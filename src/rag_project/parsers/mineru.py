@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from rag_project.parsers.base import DocumentParser, ParsedDocument, ParseOptions, UploadedFile
+from rag_project.parsers.image_explanations import ImageAsset, ImageExplanationGenerator
 from rag_project.storage import (
     MinioStorage,
     build_parsed_image_key,
@@ -40,12 +41,14 @@ class MinerUApiParser(DocumentParser):
         request_timeout: float = 60.0,
         poll_interval_seconds: float = 2.0,
         max_wait_seconds: float = 600.0,
+        image_explainer: ImageExplanationGenerator | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.storage = storage
         self.request_timeout = request_timeout
         self.poll_interval_seconds = poll_interval_seconds
         self.max_wait_seconds = max_wait_seconds
+        self.image_explainer = image_explainer
 
     async def parse(self, file: UploadedFile, options: ParseOptions) -> ParsedDocument:
         filename = sanitize_object_part(file.filename)
@@ -68,6 +71,7 @@ class MinerUApiParser(DocumentParser):
             content_list_object_key=artifacts.get("content_list_object_key"),
             middle_json_object_key=artifacts.get("middle_json_object_key"),
             image_object_keys=artifacts["image_object_keys"],
+            image_explanation_chunks=artifacts["image_explanation_chunks"],
             raw_object_key=raw_key,
             parse_options=options.model_dump(mode="json"),
             created_at=datetime.now(timezone.utc),
@@ -146,6 +150,8 @@ class MinerUApiParser(DocumentParser):
         content_list_object_key: str | None = None
         middle_json_object_key: str | None = None
         image_object_keys: list[str] = []
+        image_assets: list[ImageAsset] = []
+        image_explanation_chunks = []
 
         with zipfile.ZipFile(BytesIO(zip_payload)) as archive:
             files = [(info.filename, archive.read(info)) for info in archive.infolist() if not info.is_dir()]
@@ -162,6 +168,13 @@ class MinerUApiParser(DocumentParser):
             content_type = mimetypes.guess_type(image_name)[0] or "application/octet-stream"
             await self.storage.put_bytes(object_key, payload, content_type)
             image_object_keys.append(object_key)
+            image_assets.append(
+                ImageAsset(
+                    image_url=self.storage.object_url(object_key),
+                    object_key=object_key,
+                    content=payload,
+                )
+            )
 
         for member_name, payload in sorted(files):
             if self._is_ignored_member(member_name) or self._is_image_member(member_name):
@@ -171,6 +184,16 @@ class MinerUApiParser(DocumentParser):
             if suffix == ".md":
                 text = payload.decode("utf-8")
                 text = rewrite_relative_image_paths(text, sync_image_url_for_name)
+                if self.image_explainer is not None:
+                    result = await self.image_explainer.enrich_markdown(
+                        text,
+                        kb_id=options.kb_id,
+                        document_id=options.document_id,
+                        image_assets=image_assets,
+                        language=options.lang_list[0] if options.lang_list else "ch",
+                    )
+                    text = result.markdown_text
+                    image_explanation_chunks.extend(result.chunks)
                 object_key = build_parsed_markdown_key(options.kb_id, options.document_id, filename)
                 await self.storage.put_bytes(object_key, text.encode("utf-8"), "text/markdown; charset=utf-8")
                 markdown_text = text
@@ -195,6 +218,7 @@ class MinerUApiParser(DocumentParser):
             "content_list_object_key": content_list_object_key,
             "middle_json_object_key": middle_json_object_key,
             "image_object_keys": image_object_keys,
+            "image_explanation_chunks": image_explanation_chunks,
         }
 
     @staticmethod

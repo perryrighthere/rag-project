@@ -31,6 +31,16 @@ class ParseOptions(BaseModel):
     return_original_file: bool = False
 
 
+class ImageExplanationChunk(BaseModel):
+    chunk_id: str
+    chunk_index: int
+    text: str
+    page_content: str
+    image_url: str
+    image_object_key: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ParsedDocument(BaseModel):
     document_id: str
     parser: str
@@ -40,6 +50,7 @@ class ParsedDocument(BaseModel):
     content_list_object_key: str | None = None
     middle_json_object_key: str | None = None
     image_object_keys: list[str] = Field(default_factory=list)
+    image_explanation_chunks: list[ImageExplanationChunk] = Field(default_factory=list)
     raw_object_key: str
     parse_options: dict[str, Any]
     created_at: datetime
@@ -48,4 +59,3 @@ class ParsedDocument(BaseModel):
 class DocumentParser(Protocol):
     async def parse(self, file: UploadedFile, options: ParseOptions) -> ParsedDocument:
         ...
-

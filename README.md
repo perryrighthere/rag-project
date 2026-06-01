@@ -33,6 +33,13 @@ MINERU_BASE_URL=http://localhost:8001
 MINERU_REQUEST_TIMEOUT=60
 MINERU_POLL_INTERVAL_SECONDS=2
 MINERU_MAX_WAIT_SECONDS=600
+
+VLM_IMAGE_EXPLANATIONS_ENABLED=false
+VLM_BASE_URL=
+VLM_API_KEY=EMPTY
+VLM_MODEL=
+VLM_TIMEOUT=120
+VLM_MAX_TOKENS=300
 ```
 
 如果本地 MinerU FastAPI 启动在 `18000` 端口，例如日志显示 `Start MinerU FastAPI Service: http://0.0.0.0:18000`，请改成：
@@ -150,6 +157,8 @@ curl -s "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 
 这些 object key 对应 MinIO 中的对象；Markdown 内的图片引用会指向 `MINIO_PUBLIC_ENDPOINT` 或 `MINIO_ENDPOINT` 生成的 HTTP URL。
 
+如果启用了 VLM 图片解释，`parsed_document.markdown_text` 会在图片行后追加引用块形式的图片说明，`parsed_document.image_explanation_chunks` 会返回图片说明的独立 chunk，供后续 4.5 chunking 和索引流程接入。
+
 ### 6. 删除文档
 
 ```bash
@@ -229,6 +238,47 @@ parsed/{kb_id}/{document_id}/json/{filename}_content_list.json
 ```
 
 Markdown 和 JSON 中的 `images/...`、`./images/...` 会被重写为 MinIO HTTP URL。
+
+## VLM 图片解释增强
+
+4.2 的可选增强可以通过环境变量启用：
+
+```bash
+VLM_IMAGE_EXPLANATIONS_ENABLED=true
+VLM_BASE_URL=https://your-openai-compatible-vlm.example.com/v1
+VLM_API_KEY=your-api-key
+VLM_MODEL=your-vlm-model
+VLM_TIMEOUT=120
+VLM_MAX_TOKENS=300
+```
+
+启用后，解析流程会在 MinerU 产物保存阶段额外执行：
+
+1. 使用已上传到 MinIO 的图片内容调用 OpenAI-compatible VLM。
+2. 将图片说明写回 Markdown，格式为 `> 图片解释：...`。
+3. 为每条图片说明生成独立的 `image_explanation_chunks`。
+
+`image_explanation_chunks` 示例：
+
+```json
+{
+  "chunk_id": "img_chunk_xxx",
+  "chunk_index": 0,
+  "text": "图片展示了审批流程的关键节点。",
+  "page_content": "图片说明：图片展示了审批流程的关键节点。\n\n图片地址：http://...",
+  "image_url": "http://...",
+  "image_object_key": "parsed/kb/doc/images/figure.png",
+  "metadata": {
+    "kb_id": "kb_xxx",
+    "document_id": "doc_xxx",
+    "chunk_type": "image_explanation",
+    "image_object_key": "parsed/kb/doc/images/figure.png",
+    "image_url": "http://..."
+  }
+}
+```
+
+默认不启用该能力。启用时必须同时配置 `VLM_BASE_URL` 和 `VLM_MODEL`；否则解析任务会失败并在任务 `error` 中返回配置错误。
 
 ## 测试
 

@@ -5,6 +5,7 @@ import pytest
 
 from rag_project.parsers import ParseOptions
 from rag_project.parsers.base import UploadedFile
+from rag_project.parsers.image_explanations import ImageExplanationResult
 from rag_project.parsers.mineru import MinerUApiParser
 
 
@@ -18,6 +19,11 @@ class FakeStorage:
 
     def object_url(self, object_key: str) -> str:
         return f"http://minio/rag/{object_key}"
+
+
+class FakeImageExplainer:
+    async def enrich_markdown(self, markdown_text, *, kb_id, document_id, image_assets, language):
+        return ImageExplanationResult(markdown_text=f"{markdown_text}> 图片解释：测试说明\n", chunks=[])
 
 
 def build_zip() -> bytes:
@@ -47,6 +53,22 @@ async def test_persist_zip_artifacts_rewrites_and_uploads() -> None:
     assert artifacts["image_object_keys"] == ["parsed/kb/doc/images/page_1.png"]
     assert "http://minio/rag/parsed/kb/doc/images/page_1.png" in artifacts["markdown_text"]
     assert storage.objects["parsed/kb/doc/images/page_1.png"] == b"png-bytes"
+
+
+@pytest.mark.asyncio
+async def test_persist_zip_artifacts_can_write_image_explanations_back_to_markdown() -> None:
+    storage = FakeStorage()
+    parser = MinerUApiParser(base_url="http://mineru", storage=storage, image_explainer=FakeImageExplainer())
+
+    artifacts = await parser._persist_zip_artifacts(  # noqa: SLF001 - parser artifact boundary test
+        build_zip(),
+        "demo.pdf",
+        ParseOptions(kb_id="kb", document_id="doc"),
+    )
+
+    assert "> 图片解释：测试说明" in artifacts["markdown_text"]
+    stored_markdown = storage.objects["parsed/kb/doc/markdown/demo.md"].decode("utf-8")
+    assert "> 图片解释：测试说明" in stored_markdown
 
 
 def test_mineru_task_form_matches_fastapi_contract() -> None:

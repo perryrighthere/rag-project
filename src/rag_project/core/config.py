@@ -25,8 +25,15 @@ class Settings(BaseSettings):
     mineru_poll_interval_seconds: float = 2.0
     mineru_max_wait_seconds: float = 600.0
 
+    vlm_image_explanations_enabled: bool = False
+    vlm_base_url: str | None = None
+    vlm_api_key: str = "EMPTY"
+    vlm_model: str | None = None
+    vlm_prompt: str | None = None
+    vlm_timeout: float = 120.0
+    vlm_max_tokens: int = 300
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
