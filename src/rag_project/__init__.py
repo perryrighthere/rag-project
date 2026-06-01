@@ -1,0 +1,2 @@
+"""RAG project application package."""
+
