@@ -35,14 +35,14 @@ dist/
 logs/
 
 # Local data and runtime files
-data/
-storage/
-uploads/
-tmp/
-temp/
-output/
-minio_output/
-api_output/
+/data/
+/storage/
+/uploads/
+/tmp/
+/temp/
+/output/
+/minio_output/
+/api_output/
 
 # Databases
 *.db
