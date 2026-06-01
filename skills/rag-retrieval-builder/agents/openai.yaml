@@ -1,0 +1,4 @@
+interface:
+  display_name: "RAG Retrieval Builder"
+  short_description: "Build filtered retrieval, rerank, and QA graph"
+  default_prompt: "Use $rag-retrieval-builder to implement metadata-filtered retrieval, rerank, and QA workflows."

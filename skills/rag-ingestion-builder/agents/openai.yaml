@@ -1,0 +1,4 @@
+interface:
+  display_name: "RAG Ingestion Builder"
+  short_description: "Build MinerU ingestion and indexing flow"
+  default_prompt: "Use $rag-ingestion-builder to implement document parsing, chunking, embedding, and Milvus indexing."

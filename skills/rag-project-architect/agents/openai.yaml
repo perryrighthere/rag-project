@@ -1,0 +1,4 @@
+interface:
+  display_name: "RAG Project Architect"
+  short_description: "Guide core architecture and repo standards"
+  default_prompt: "Use $rag-project-architect to plan or review changes in the RAG project."
