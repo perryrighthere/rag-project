@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from rag_project.api.schemas import DocumentRecord, KnowledgeBaseRecord, TaskRecord
+from rag_project.chunking import ChunkRecord
 
 
 class InMemoryStore:
@@ -10,6 +11,7 @@ class InMemoryStore:
     def __init__(self) -> None:
         self.knowledge_bases: dict[str, KnowledgeBaseRecord] = {}
         self.documents: dict[str, DocumentRecord] = {}
+        self.chunks: dict[str, ChunkRecord] = {}
         self.tasks: dict[str, TaskRecord] = {}
         self._lock = asyncio.Lock()
 
@@ -41,6 +43,22 @@ class InMemoryStore:
             self.documents[document_id] = updated
             return updated
 
+    async def replace_document_chunks(self, document_id: str, chunks: list[ChunkRecord]) -> list[ChunkRecord]:
+        async with self._lock:
+            for chunk_id, chunk in list(self.chunks.items()):
+                if chunk.document_id == document_id:
+                    del self.chunks[chunk_id]
+            for index, chunk in enumerate(chunks):
+                indexed = chunk.model_copy(update={"chunk_index": index})
+                self.chunks[indexed.chunk_id] = indexed
+            return self.list_document_chunks(document_id)
+
+    def list_document_chunks(self, document_id: str) -> list[ChunkRecord]:
+        return sorted(
+            [chunk for chunk in self.chunks.values() if chunk.document_id == document_id],
+            key=lambda chunk: chunk.chunk_index,
+        )
+
     async def add_task(self, record: TaskRecord) -> TaskRecord:
         async with self._lock:
             self.tasks[record.task_id] = record
@@ -57,4 +75,3 @@ class InMemoryStore:
 
 
 store = InMemoryStore()
-

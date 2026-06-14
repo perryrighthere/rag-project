@@ -1,20 +1,30 @@
 # RAG Project
 
-面向复杂文档的 RAG 服务骨架，当前完成技术规划中 4.1-4.3：
+面向复杂文档的 RAG 服务骨架，当前完成技术规划中 4.1-4.8 的最小闭环：
 
 - FastAPI API 服务与知识库、文档、任务路由。
 - MinerU HTTP API parser adapter。
 - MinIO 原文与解析产物存储封装。
+- 知识库 metadata schema、文档 metadata 校验与文档状态管理。
+- Markdown chunking 与 LangChain `Document` 转换。
+- OpenAI-compatible Embedding 封装与维度校验。
+- Milvus chunk upsert/search 适配器。
+- 安全的 metadata filter builder，用户不能直接传 Milvus expr。
 
 ## 目录
 
 ```text
 src/rag_project/
   api/        FastAPI 路由、请求/响应模型、依赖
+  chunking/   Markdown 标准化、可配置切分、LangChain Document 转换
   core/       配置
+  embeddings/ OpenAI-compatible Embedding 客户端
+  knowledge_base/ metadata schema 与校验
   parsers/    DocumentParser 抽象与 MinerUApiParser
+  retrieval/  Milvus filter builder
   storage/    MinIO 客户端、对象路径约定、Markdown 图片路径重写
-  services/   4.4 数据库落地前的开发期内存状态
+  vectorstores/ Milvus collection/upsert/search 封装
+  services/   数据库落地前的开发期内存状态
 ```
 
 ## 配置
@@ -40,6 +50,16 @@ VLM_API_KEY=EMPTY
 VLM_MODEL=
 VLM_TIMEOUT=120
 VLM_MAX_TOKENS=300
+
+EMBEDDING_BASE_URL=https://your-openai-compatible-provider.example.com/v1
+EMBEDDING_API_KEY=your-api-key
+EMBEDDING_MODEL=text-embedding-model
+EMBEDDING_DIM=1024
+EMBEDDING_BATCH_SIZE=32
+EMBEDDING_TIMEOUT=60
+
+MILVUS_URI=http://127.0.0.1:19530
+MILVUS_COLLECTION=rag_chunks
 ```
 
 如果本地 MinerU FastAPI 启动在 `18000` 端口，例如日志显示 `Start MinerU FastAPI Service: http://0.0.0.0:18000`，请改成：
@@ -70,12 +90,14 @@ curl http://127.0.0.1:8000/health
 
 ## 如何使用服务
 
-当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> 查询任务和文档状态”的最小链路。知识库、文档和任务状态暂存在内存里，服务重启后会清空；持久化数据库属于后续 4.4 模块。
+当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索”的最小链路。知识库、文档、chunk 和任务状态暂存在内存里，服务重启后会清空；后续接 SQLAlchemy 时应复用现有业务模型和校验边界。
 
 使用前需要先确保两个外部服务可访问：
 
 - MinIO：用于保存原始文件、Markdown、图片和 JSON。
 - MinerU API：需要提供 `GET /health`、`POST /tasks`、`GET /tasks/{task_id}`、`GET /tasks/{task_id}/result`。
+- Embedding API：OpenAI-compatible `/embeddings`。
+- Milvus：用于保存 chunk 向量和可过滤 scalar 字段。
 
 ### 1. 创建知识库
 
@@ -88,13 +110,20 @@ curl -s -X POST http://127.0.0.1:8000/knowledge-bases \
     "metadata_schema": {
       "fields": [
         {"name": "doc_type", "type": "string", "required": false, "filterable": true},
-        {"name": "department", "type": "string", "required": false, "filterable": true}
+        {"name": "department", "type": "string", "required": false, "filterable": true},
+        {"name": "year", "type": "int", "required": false, "filterable": true},
+        {"name": "tags", "type": "string_array", "required": false, "filterable": true}
       ]
+    },
+    "chunking_config": {
+      "chunk_size": 800,
+      "chunk_overlap": 120,
+      "separators": ["\n## ", "\n### ", "\n\n", "\n", "。", "，", " "]
     }
   }'
 ```
 
-响应中会返回 `kb_id`，后续上传文档时使用它。
+响应中会返回 `kb_id`，后续上传文档时使用它。上传文档 metadata 必须符合该 schema；未声明字段、缺少 required 字段或类型错误都会返回 `422`。
 
 ### 2. 上传文档
 
@@ -103,7 +132,7 @@ KB_ID="kb_xxx"
 
 curl -s -X POST "http://127.0.0.1:8000/knowledge-bases/${KB_ID}/documents" \
   -F "file=@/absolute/path/to/document.pdf;type=application/pdf" \
-  -F 'metadata={"doc_type":"policy","department":"finance"}'
+  -F 'metadata={"doc_type":"policy","department":"finance","year":2025,"tags":["travel"]}'
 ```
 
 响应中会返回 `document_id`。当前实现会把上传文件内容暂存在内存里，真正写入 MinIO 发生在解析任务启动后。
@@ -159,7 +188,71 @@ curl -s "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 
 如果启用了 VLM 图片解释，`parsed_document.markdown_text` 会在图片行后追加引用块形式的图片说明，`parsed_document.image_explanation_chunks` 会返回图片说明的独立 chunk，供后续 4.5 chunking 和索引流程接入。
 
-### 6. 删除文档
+### 6. 启动索引
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/index"
+```
+
+响应中会返回 `task_id`。服务会在后台执行：
+
+1. 标准化 MinerU Markdown。
+2. 按知识库 `chunking_config` 使用 Markdown header splitter 和 recursive splitter 生成 chunks。
+3. 将标题路径拼回 chunk 正文，使标题语义参与 embedding。
+4. 合并系统 metadata、用户 metadata、chunk metadata。
+5. 调用 OpenAI-compatible Embedding API，并校验向量维度等于 `EMBEDDING_DIM`。
+6. 删除该文档旧 chunks，再 upsert 新 chunks 到 Milvus collection。
+7. 将文档状态更新为 `indexed`，并记录 `chunk_count`、`embedding_model`、`embedding_dim`。
+
+重新索引使用同一个流程：
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/reindex"
+```
+
+查询当前内存中的 chunks：
+
+```bash
+curl -s "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/chunks"
+```
+
+### 7. Metadata 过滤检索
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/retrieval/search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "kb_id": "'"${KB_ID}"'",
+    "query": "报销政策是什么？",
+    "top_k": 5,
+    "filters": {
+      "doc_type": {"$eq": "policy"},
+      "year": {"$gte": 2024},
+      "department": {"$in": ["finance", "hr"]},
+      "tags": {"$contains": "travel"}
+    }
+  }'
+```
+
+服务会先用知识库 metadata schema 校验字段、操作符和值类型，再生成 Milvus filter expr。调用方不能传原始 Milvus 表达式。
+
+支持的操作符：
+
+```text
+$eq
+$ne
+$gt
+$gte
+$lt
+$lte
+$in
+$nin
+$contains
+```
+
+响应包含 `filter_expr` 和 matches。`filter_expr` 会自动附加 `kb_id == "<kb_id>"`，确保检索隔离到当前知识库。
+
+### 8. 删除文档
 
 ```bash
 curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
@@ -178,18 +271,47 @@ curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 - `PATCH /knowledge-bases/{kb_id}/metadata-schema`
 - `POST /knowledge-bases/{kb_id}/documents`
 - `GET /documents/{document_id}`
+- `GET /documents/{document_id}/chunks`
 - `DELETE /documents/{document_id}`
 - `POST /documents/{document_id}/parse`
+- `POST /documents/{document_id}/index`
+- `POST /documents/{document_id}/reindex`
 - `GET /tasks/{task_id}`
+- `POST /retrieval/search`
 
 已预留但返回 `501`：
 
-- `POST /documents/{document_id}/index`
-- `POST /documents/{document_id}/reindex`
-- `POST /retrieval/search`
 - `POST /chat`
 
-这些属于后续 chunking、embedding、Milvus、retrieval 和 QA graph 模块。
+`POST /chat` 属于后续 QA graph 模块。
+
+## Metadata Schema 与 Filter 安全边界
+
+知识库 schema 支持字段类型：
+
+```text
+string
+int
+float
+bool
+date
+datetime
+string_array
+```
+
+上传文档时会校验：
+
+- 字段必须在 schema 中声明。
+- `required=true` 字段必须提供。
+- 值类型必须与字段类型匹配。
+
+检索时会校验：
+
+- filter 字段必须在 schema 中声明。
+- filter 字段必须设置 `filterable=true`。
+- 操作符必须受支持且适用于字段类型。
+- 字符串会由项目代码转义后再拼入 Milvus expr。
+- filter 深度和条件数有限制，避免复杂表达式直接穿透到 Milvus。
 
 ## MinerU 解析流程
 

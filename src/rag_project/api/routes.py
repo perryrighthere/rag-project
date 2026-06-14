@@ -2,19 +2,28 @@ import json
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile, status
 
-from rag_project.api.dependencies import get_parser
+from rag_project.api.dependencies import get_embedding_client, get_parser, get_vector_store
 from rag_project.api.schemas import (
     ChatRequest,
+    DocumentChunksResponse,
     DocumentRecord,
     KnowledgeBaseCreate,
     KnowledgeBaseRecord,
     KnowledgeBaseUpdate,
     MetadataSchema,
+    RetrievalMatch,
     RetrievalSearchRequest,
+    RetrievalSearchResponse,
     TaskRecord,
 )
+from rag_project.chunking import MarkdownChunker
+from rag_project.core.config import get_settings
+from rag_project.embeddings import OpenAICompatibleEmbeddingClient
+from rag_project.knowledge_base import MetadataValidationError
 from rag_project.parsers import MinerUApiParser, ParseOptions, UploadedFile as ParserUploadedFile
+from rag_project.retrieval import MilvusFilterBuilder
 from rag_project.services.memory_store import store
+from rag_project.vectorstores import MilvusVectorStoreAdapter
 
 
 router = APIRouter()
@@ -66,7 +75,8 @@ async def upload_document(
     file: UploadFile = File(...),
     metadata: str = Form(default="{}"),
 ) -> DocumentRecord:
-    if kb_id not in store.knowledge_bases:
+    knowledge_base = store.knowledge_bases.get(kb_id)
+    if knowledge_base is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found")
     try:
         parsed_metadata = json.loads(metadata)
@@ -74,6 +84,10 @@ async def upload_document(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="metadata must be a JSON object") from exc
     if not isinstance(parsed_metadata, dict):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="metadata must be a JSON object")
+    try:
+        knowledge_base.metadata_schema.validate_document_metadata(parsed_metadata)
+    except MetadataValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     content = await file.read()
     record = DocumentRecord(
@@ -92,6 +106,13 @@ async def get_document(document_id: str) -> DocumentRecord:
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     return record
+
+
+@router.get("/documents/{document_id}/chunks", response_model=DocumentChunksResponse)
+async def list_document_chunks(document_id: str) -> DocumentChunksResponse:
+    if document_id not in store.documents:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return DocumentChunksResponse(document_id=document_id, chunks=store.list_document_chunks(document_id))
 
 
 @router.delete("/documents/{document_id}", response_model=DocumentRecord)
@@ -118,18 +139,36 @@ async def parse_document(document_id: str, background_tasks: BackgroundTasks) ->
     return task
 
 
-@router.post("/documents/{document_id}/index")
-async def index_document(document_id: str) -> None:
-    if document_id not in store.documents:
+@router.post("/documents/{document_id}/index", response_model=TaskRecord, status_code=status.HTTP_202_ACCEPTED)
+async def index_document(document_id: str, background_tasks: BackgroundTasks) -> TaskRecord:
+    document = store.documents.get(document_id)
+    if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Indexing belongs to architecture section 4.5-4.7")
+    if document.status == "deleted":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deleted documents cannot be indexed")
+    if document.parsed_document is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document must be parsed before indexing")
+
+    task = await store.add_task(TaskRecord(task_type="index", document_id=document_id))
+    await store.update_document(document_id, status="chunking", error=None)
+    background_tasks.add_task(
+        _run_index_task,
+        task.task_id,
+        document_id,
+        get_embedding_client,
+        get_vector_store(),
+    )
+    return task
 
 
-@router.post("/documents/{document_id}/reindex")
-async def reindex_document(document_id: str) -> None:
-    if document_id not in store.documents:
+@router.post("/documents/{document_id}/reindex", response_model=TaskRecord, status_code=status.HTTP_202_ACCEPTED)
+async def reindex_document(document_id: str, background_tasks: BackgroundTasks) -> TaskRecord:
+    document = store.documents.get(document_id)
+    if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Reindexing belongs to architecture section 4.5-4.7")
+    if document.parsed_document is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document must be parsed before reindexing")
+    return await index_document(document_id, background_tasks)
 
 
 @router.get("/tasks/{task_id}", response_model=TaskRecord)
@@ -140,9 +179,46 @@ async def get_task(task_id: str) -> TaskRecord:
     return record
 
 
-@router.post("/retrieval/search")
-async def search(_: RetrievalSearchRequest) -> None:
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Retrieval belongs to architecture section 4.8-4.10")
+@router.post("/retrieval/search", response_model=RetrievalSearchResponse)
+async def search(payload: RetrievalSearchRequest) -> RetrievalSearchResponse:
+    knowledge_base = store.knowledge_bases.get(payload.kb_id)
+    if knowledge_base is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found")
+    try:
+        filter_expr = MilvusFilterBuilder().build(
+            kb_id=payload.kb_id,
+            metadata_schema=knowledge_base.metadata_schema,
+            filters=payload.filters,
+        )
+        query_vector = await get_embedding_client().embed_query(payload.query)
+        matches = await get_vector_store().search(
+            query_vector=query_vector,
+            filter_expr=filter_expr,
+            top_k=payload.top_k,
+        )
+    except MetadataValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    return RetrievalSearchResponse(
+        query=payload.query,
+        filter_expr=filter_expr,
+        matches=[
+            RetrievalMatch(
+                chunk_id=match.chunk_id,
+                document_id=match.document_id,
+                score=match.score,
+                text=match.text,
+                source_uri=match.source_uri,
+                heading_path=match.heading_path,
+                page_start=match.page_start,
+                page_end=match.page_end,
+                metadata=match.metadata,
+            )
+            for match in matches
+        ],
+    )
 
 
 @router.post("/chat")
@@ -175,3 +251,73 @@ async def _run_parse_task(task_id: str, document_id: str, parser: MinerUApiParse
         await store.update_document(document_id, status="failed", error=str(exc))
         await store.update_task(task_id, status="failed", error=str(exc))
 
+
+async def _run_index_task(
+    task_id: str,
+    document_id: str,
+    embedding_client_factory,
+    vector_store: MilvusVectorStoreAdapter,
+) -> None:
+    document = store.documents[document_id]
+    knowledge_base = store.knowledge_bases[document.kb_id]
+    assert document.parsed_document is not None
+
+    await store.update_task(task_id, status="running")
+    try:
+        source_uri = _source_uri(document.parsed_document.markdown_object_key)
+        chunker = MarkdownChunker(knowledge_base.chunking_config)
+        chunks = chunker.chunk_parsed_document(
+            document.parsed_document,
+            kb_id=document.kb_id,
+            document_id=document.document_id,
+            document_metadata=document.metadata,
+            source_uri=source_uri,
+        )
+        await store.update_document(document_id, status="embedding")
+        embedding_client: OpenAICompatibleEmbeddingClient = embedding_client_factory()
+        vectors = await embedding_client.embed_documents([chunk.text for chunk in chunks])
+        chunks = [
+            chunk.model_copy(
+                update={
+                    "embedding_model": embedding_client.config.model,
+                    "embedding_dim": embedding_client.config.dim,
+                }
+            )
+            for chunk in chunks
+        ]
+
+        await store.update_document(document_id, status="embedding")
+        await vector_store.delete_document_chunks(kb_id=document.kb_id, document_id=document.document_id)
+        await vector_store.upsert_chunks(
+            chunks,
+            vectors,
+            metadata_schema=knowledge_base.metadata_schema,
+            embedding_dim=embedding_client.config.dim,
+        )
+        chunks = await store.replace_document_chunks(document_id, chunks)
+        await store.update_knowledge_base(
+            document.kb_id,
+            embedding_model=embedding_client.config.model,
+            embedding_dim=embedding_client.config.dim,
+        )
+        await store.update_document(
+            document_id,
+            status="indexed",
+            chunk_count=len(chunks),
+            embedding_model=embedding_client.config.model,
+            embedding_dim=embedding_client.config.dim,
+            error=None,
+        )
+        await store.update_task(
+            task_id,
+            status="succeeded",
+            result={"chunk_count": len(chunks), "embedding_model": embedding_client.config.model},
+        )
+    except Exception as exc:
+        await store.update_document(document_id, status="failed", error=str(exc))
+        await store.update_task(task_id, status="failed", error=str(exc))
+
+
+def _source_uri(object_key: str) -> str:
+    settings = get_settings()
+    return f"minio://{settings.minio_bucket}/{object_key}"

@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     vlm_timeout: float = 120.0
     vlm_max_tokens: int = 300
 
+    embedding_base_url: str | None = None
+    embedding_api_key: str = "EMPTY"
+    embedding_model: str | None = None
+    embedding_dim: int = 1024
+    embedding_batch_size: int = 32
+    embedding_timeout: float = 60.0
+
+    milvus_uri: str = "http://127.0.0.1:19530"
+    milvus_collection: str = "rag_chunks"
+
 
 @lru_cache
 def get_settings() -> Settings:

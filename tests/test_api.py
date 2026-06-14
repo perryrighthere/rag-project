@@ -12,7 +12,17 @@ def test_health_endpoint() -> None:
 
 def test_create_kb_and_upload_document() -> None:
     client = TestClient(create_app())
-    kb_response = client.post("/knowledge-bases", json={"name": "policy"})
+    kb_response = client.post(
+        "/knowledge-bases",
+        json={
+            "name": "policy",
+            "metadata_schema": {
+                "fields": [
+                    {"name": "doc_type", "type": "string", "required": True, "filterable": True}
+                ]
+            },
+        },
+    )
     assert kb_response.status_code == 201
     kb_id = kb_response.json()["kb_id"]
 
@@ -28,3 +38,28 @@ def test_create_kb_and_upload_document() -> None:
     assert payload["filename"] == "demo.pdf"
     assert payload["metadata"] == {"doc_type": "policy"}
     assert "file_content" not in payload
+
+
+def test_upload_document_rejects_metadata_outside_schema() -> None:
+    client = TestClient(create_app())
+    kb_response = client.post(
+        "/knowledge-bases",
+        json={
+            "name": "strict policy",
+            "metadata_schema": {
+                "fields": [
+                    {"name": "doc_type", "type": "string", "required": True, "filterable": True}
+                ]
+            },
+        },
+    )
+    kb_id = kb_response.json()["kb_id"]
+
+    response = client.post(
+        f"/knowledge-bases/{kb_id}/documents",
+        files={"file": ("demo.pdf", b"%PDF", "application/pdf")},
+        data={"metadata": '{"doc_type": "policy", "department": "finance"}'},
+    )
+
+    assert response.status_code == 422
+    assert "unknown metadata fields" in response.json()["detail"]

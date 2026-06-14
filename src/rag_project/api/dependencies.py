@@ -1,8 +1,10 @@
 from functools import lru_cache
 
 from rag_project.core.config import Settings, get_settings
+from rag_project.embeddings import EmbeddingConfig, OpenAICompatibleEmbeddingClient
 from rag_project.parsers import ImageExplanationConfig, ImageExplanationGenerator, MinerUApiParser
 from rag_project.storage import MinioStorage, MinioStorageConfig
+from rag_project.vectorstores import MilvusVectorStoreAdapter, VectorStoreConfig
 
 
 @lru_cache
@@ -43,4 +45,31 @@ def get_parser() -> MinerUApiParser:
         poll_interval_seconds=settings.mineru_poll_interval_seconds,
         max_wait_seconds=settings.mineru_max_wait_seconds,
         image_explainer=image_explainer,
+    )
+
+
+def get_embedding_client() -> OpenAICompatibleEmbeddingClient:
+    settings = get_settings()
+    if not settings.embedding_model:
+        raise ValueError("EMBEDDING_MODEL must be configured before indexing or retrieval")
+    return OpenAICompatibleEmbeddingClient(
+        EmbeddingConfig(
+            base_url=settings.embedding_base_url,
+            api_key=settings.embedding_api_key,
+            model=settings.embedding_model,
+            dim=settings.embedding_dim,
+            batch_size=settings.embedding_batch_size,
+            timeout=settings.embedding_timeout,
+        )
+    )
+
+
+@lru_cache
+def get_vector_store() -> MilvusVectorStoreAdapter:
+    settings = get_settings()
+    return MilvusVectorStoreAdapter(
+        VectorStoreConfig(
+            uri=settings.milvus_uri,
+            collection=settings.milvus_collection,
+        )
     )
