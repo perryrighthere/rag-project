@@ -43,6 +43,7 @@ logs/
 /output/
 /minio_output/
 /api_output/
+/volumes/
 
 # Databases
 *.db
