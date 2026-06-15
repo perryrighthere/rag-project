@@ -40,6 +40,9 @@ MINIO_SECURE=false
 MINIO_PUBLIC_ENDPOINT=http://localhost:9000
 
 MINERU_BASE_URL=http://localhost:8001
+MINERU_BACKEND=pipeline
+MINERU_PARSE_METHOD=auto
+MINERU_LANG_LIST='["ch"]'
 MINERU_REQUEST_TIMEOUT=60
 MINERU_POLL_INTERVAL_SECONDS=2
 MINERU_MAX_WAIT_SECONDS=600
@@ -90,7 +93,7 @@ curl http://127.0.0.1:8000/health
 
 ## 如何使用服务
 
-当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索”的最小链路。知识库、文档、chunk 和任务状态暂存在内存里，服务重启后会清空；后续接 SQLAlchemy 时应复用现有业务模型和校验边界。
+当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索”的最小链路。知识库、文档、chunk 和任务状态暂存在内存里，服务重启后会清空；正在运行的 FastAPI `BackgroundTasks` 也绑定当前服务进程，服务停止或热重载后不会自动恢复。后续接 SQLAlchemy 和真正的任务队列时应复用现有业务模型和校验边界。
 
 使用前需要先确保两个外部服务可访问：
 
@@ -168,6 +171,8 @@ curl -s "http://127.0.0.1:8000/tasks/${TASK_ID}"
 - `running`：正在调用 MinerU 或保存产物。
 - `succeeded`：解析成功，`result` 中包含 `ParsedDocument`。
 - `failed`：解析失败，`error` 中包含失败原因。
+
+`POST /documents/{document_id}/parse` 返回 `202` 时，响应里的任务状态可能仍是 `pending`，这是任务刚创建时的快照。后台任务会在响应返回后开始执行，并把任务状态更新为 `running`。如果服务进程停止、`uvicorn --reload` 触发重启或多进程 worker 切换，当前内存任务不会自动恢复，已提交到 MinerU 的外部任务也不会被本服务继续追踪。
 
 ### 5. 查询文档和解析结果
 
@@ -322,7 +327,7 @@ string_array
 - `GET /tasks/{task_id}`
 - `GET /tasks/{task_id}/result`
 
-默认参数与技术规划保持一致：`backend=hybrid-auto-engine`、`parse_method=auto`、`lang_list=["ch"]`、返回 Markdown、middle json、content list、图片和 zip。
+默认参数：`backend=pipeline`、`parse_method=auto`、`lang_list=["ch"]`、返回 Markdown、middle json、content list、图片和 zip。可通过 `MINERU_BACKEND` 切换为 MinerU 支持的其他后端，例如 `hybrid-auto-engine`、`vlm-auto-engine`、`vlm-http-client`。
 
 `POST /tasks` 使用 MinerU FastAPI 的实际 multipart 契约：
 
@@ -336,7 +341,7 @@ string_array
 curl -X POST "${MINERU_BASE_URL}/tasks" \
   -F "files=@/absolute/path/to/document.pdf;type=application/pdf" \
   -F "lang_list=ch" \
-  -F "backend=hybrid-auto-engine" \
+  -F "backend=pipeline" \
   -F "parse_method=auto" \
   -F "formula_enable=true" \
   -F "table_enable=true" \

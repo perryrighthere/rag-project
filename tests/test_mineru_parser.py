@@ -75,6 +75,7 @@ def test_mineru_task_form_matches_fastapi_contract() -> None:
     form = MinerUApiParser._to_form_data(ParseOptions(kb_id="kb", document_id="doc"))  # noqa: SLF001
 
     assert form["lang_list"] == ["ch"]
+    assert form["backend"] == "pipeline"
     assert form["return_md"] == "true"
     assert form["return_middle_json"] == "true"
     assert form["return_content_list"] == "true"

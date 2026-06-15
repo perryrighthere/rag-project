@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     minio_public_endpoint: str | None = None
 
     mineru_base_url: HttpUrl = Field(default="http://localhost:8001")
+    mineru_backend: str = "pipeline"
+    mineru_parse_method: str = "auto"
+    mineru_lang_list: list[str] = Field(default_factory=lambda: ["ch"])
     mineru_request_timeout: float = 60.0
     mineru_poll_interval_seconds: float = 2.0
     mineru_max_wait_seconds: float = 600.0

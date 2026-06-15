@@ -17,7 +17,7 @@ class ParseOptions(BaseModel):
 
     kb_id: str
     document_id: str
-    backend: str = "hybrid-auto-engine"
+    backend: str = "pipeline"
     parse_method: str = "auto"
     lang_list: list[str] = Field(default_factory=lambda: ["ch"])
     formula_enable: bool = True

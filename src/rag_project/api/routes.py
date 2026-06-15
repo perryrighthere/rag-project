@@ -228,6 +228,7 @@ async def chat(_: ChatRequest) -> None:
 
 async def _run_parse_task(task_id: str, document_id: str, parser: MinerUApiParser) -> None:
     document = store.documents[document_id]
+    settings = get_settings()
     assert document.file_content is not None
     await store.update_task(task_id, status="running")
     try:
@@ -237,7 +238,13 @@ async def _run_parse_task(task_id: str, document_id: str, parser: MinerUApiParse
                 content=document.file_content,
                 content_type=document.content_type,
             ),
-            ParseOptions(kb_id=document.kb_id, document_id=document.document_id),
+            ParseOptions(
+                kb_id=document.kb_id,
+                document_id=document.document_id,
+                backend=settings.mineru_backend,
+                parse_method=settings.mineru_parse_method,
+                lang_list=settings.mineru_lang_list,
+            ),
         )
         await store.update_document(
             document_id,
