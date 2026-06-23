@@ -76,6 +76,7 @@ class RetrievalSearchRequest(BaseModel):
     query: str
     filters: dict[str, Any] = Field(default_factory=dict)
     top_k: int = Field(default=10, ge=1, le=100)
+    top_n: int | None = Field(default=None, ge=1, le=100)
 
 
 class RetrievalMatch(BaseModel):
@@ -95,6 +96,7 @@ class RetrievalSearchResponse(BaseModel):
     query: str
     filter_expr: str
     matches: list[RetrievalMatch] = Field(default_factory=list)
+    rerank_error: str | None = None
 
 
 class DocumentChunksResponse(BaseModel):
@@ -106,3 +108,25 @@ class ChatRequest(BaseModel):
     kb_id: str
     query: str
     filters: dict[str, Any] = Field(default_factory=dict)
+    top_k: int = Field(default=10, ge=1, le=100)
+    top_n: int | None = Field(default=None, ge=1, le=100)
+
+
+class ChatCitation(BaseModel):
+    chunk_id: str | None = None
+    document_id: str | None = None
+    source_uri: str | None = None
+    heading_path: str = ""
+    page_start: int | None = None
+    page_end: int | None = None
+    score: float | None = None
+    rerank_score: float | None = None
+
+
+class ChatResponse(BaseModel):
+    query: str
+    answer: str
+    filter_expr: str
+    citations: list[ChatCitation] = Field(default_factory=list)
+    matches: list[RetrievalMatch] = Field(default_factory=list)
+    rerank_error: str | None = None

@@ -2,9 +2,17 @@ import json
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile, status
 
-from rag_project.api.dependencies import get_embedding_client, get_parser, get_vector_store
+from rag_project.api.dependencies import (
+    get_embedding_client,
+    get_ingestion_graph,
+    get_parser,
+    get_qa_graph,
+    get_retriever,
+    get_vector_store,
+)
 from rag_project.api.schemas import (
     ChatRequest,
+    ChatResponse,
     DocumentChunksResponse,
     DocumentRecord,
     KnowledgeBaseCreate,
@@ -21,7 +29,6 @@ from rag_project.core.config import get_settings
 from rag_project.embeddings import OpenAICompatibleEmbeddingClient
 from rag_project.knowledge_base import MetadataValidationError
 from rag_project.parsers import MinerUApiParser, ParseOptions, UploadedFile as ParserUploadedFile
-from rag_project.retrieval import MilvusFilterBuilder
 from rag_project.services.memory_store import store
 from rag_project.vectorstores import MilvusVectorStoreAdapter
 
@@ -171,6 +178,21 @@ async def reindex_document(document_id: str, background_tasks: BackgroundTasks) 
     return await index_document(document_id, background_tasks)
 
 
+@router.post("/documents/{document_id}/ingest", response_model=TaskRecord, status_code=status.HTTP_202_ACCEPTED)
+async def ingest_document(document_id: str, background_tasks: BackgroundTasks) -> TaskRecord:
+    document = store.documents.get(document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if document.status == "deleted":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deleted documents cannot be ingested")
+    if document.file_content is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document file content is unavailable")
+
+    task = await store.add_task(TaskRecord(task_type="ingest", document_id=document_id))
+    background_tasks.add_task(get_ingestion_graph().run, task_id=task.task_id, document_id=document_id)
+    return task
+
+
 @router.get("/tasks/{task_id}", response_model=TaskRecord)
 async def get_task(task_id: str) -> TaskRecord:
     record = store.tasks.get(task_id)
@@ -181,29 +203,25 @@ async def get_task(task_id: str) -> TaskRecord:
 
 @router.post("/retrieval/search", response_model=RetrievalSearchResponse)
 async def search(payload: RetrievalSearchRequest) -> RetrievalSearchResponse:
-    knowledge_base = store.knowledge_bases.get(payload.kb_id)
-    if knowledge_base is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found")
     try:
-        filter_expr = MilvusFilterBuilder().build(
+        result = await get_retriever().search(
             kb_id=payload.kb_id,
-            metadata_schema=knowledge_base.metadata_schema,
+            query=payload.query,
             filters=payload.filters,
-        )
-        query_vector = await get_embedding_client().embed_query(payload.query)
-        matches = await get_vector_store().search(
-            query_vector=query_vector,
-            filter_expr=filter_expr,
             top_k=payload.top_k,
+            top_n=payload.top_n,
         )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found") from exc
     except MetadataValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
     return RetrievalSearchResponse(
-        query=payload.query,
-        filter_expr=filter_expr,
+        query=result.query,
+        filter_expr=result.filter_expr,
+        rerank_error=result.rerank_error,
         matches=[
             RetrievalMatch(
                 chunk_id=match.chunk_id,
@@ -216,14 +234,50 @@ async def search(payload: RetrievalSearchRequest) -> RetrievalSearchResponse:
                 page_end=match.page_end,
                 metadata=match.metadata,
             )
-            for match in matches
+            for match in result.matches
         ],
     )
 
 
-@router.post("/chat")
-async def chat(_: ChatRequest) -> None:
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="QA graph belongs to architecture section 4.11")
+@router.post("/chat", response_model=ChatResponse)
+async def chat(payload: ChatRequest) -> ChatResponse:
+    try:
+        result = await get_qa_graph().run(
+            kb_id=payload.kb_id,
+            query=payload.query,
+            filters=payload.filters,
+            top_k=payload.top_k,
+            top_n=payload.top_n,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found") from exc
+    except MetadataValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    return ChatResponse(
+        query=result.query,
+        answer=result.answer,
+        filter_expr=result.filter_expr,
+        citations=result.citations,
+        rerank_error=result.rerank_error,
+        matches=[
+            RetrievalMatch(
+                chunk_id=str(document.metadata.get("chunk_id") or ""),
+                document_id=str(document.metadata.get("document_id") or ""),
+                score=document.metadata.get("score"),
+                rerank_score=document.metadata.get("rerank_score"),
+                text=document.page_content,
+                source_uri=document.metadata.get("source_uri"),
+                heading_path=str(document.metadata.get("heading_path") or ""),
+                page_start=document.metadata.get("page_start"),
+                page_end=document.metadata.get("page_end"),
+                metadata=dict(document.metadata.get("_source_metadata") or {}),
+            )
+            for document in result.reranked_documents
+        ],
+    )
 
 
 async def _run_parse_task(task_id: str, document_id: str, parser: MinerUApiParser) -> None:

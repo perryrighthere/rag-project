@@ -1,6 +1,6 @@
 # RAG Project
 
-面向复杂文档的 RAG 服务骨架，当前完成技术规划中 4.1-4.8 的最小闭环：
+面向复杂文档的 RAG 服务骨架，当前完成技术规划中 4.1-4.12 的最小闭环：
 
 - FastAPI API 服务与知识库、文档、任务路由。
 - MinerU HTTP API parser adapter。
@@ -10,18 +10,23 @@
 - OpenAI-compatible Embedding 封装与维度校验。
 - Milvus chunk upsert/search 适配器。
 - 安全的 metadata filter builder，用户不能直接传 Milvus expr。
+- OpenAI-compatible rerank adapter，未配置时按向量召回顺序降级。
+- LangGraph QA graph 与 ingestion graph。
 
 ## 目录
 
 ```text
 src/rag_project/
   api/        FastAPI 路由、请求/响应模型、依赖
+  chat/       OpenAI-compatible ChatModel facade
   chunking/   Markdown 标准化、可配置切分、LangChain Document 转换
   core/       配置
   embeddings/ OpenAI-compatible Embedding 客户端
+  graphs/     LangGraph QA 与文档入库工作流
   knowledge_base/ metadata schema 与校验
   parsers/    DocumentParser 抽象与 MinerUApiParser
-  retrieval/  Milvus filter builder
+  rerankers/  OpenAI-compatible rerank adapter 与降级实现
+  retrieval/  Milvus filter builder、检索与 rerank 编排
   storage/    MinIO 客户端、对象路径约定、Markdown 图片路径重写
   vectorstores/ Milvus collection/upsert/search 封装
   services/   数据库落地前的开发期内存状态
@@ -63,6 +68,18 @@ EMBEDDING_TIMEOUT=60
 
 MILVUS_URI=http://127.0.0.1:19530
 MILVUS_COLLECTION=rag_chunks
+
+RERANK_BASE_URL=https://your-openai-compatible-provider.example.com/v1
+RERANK_API_KEY=your-api-key
+RERANK_MODEL=rerank-model
+RERANK_TIMEOUT=60
+
+CHAT_BASE_URL=https://your-openai-compatible-provider.example.com/v1
+CHAT_API_KEY=your-api-key
+CHAT_MODEL=chat-model
+CHAT_TIMEOUT=60
+CHAT_TEMPERATURE=0.2
+CHAT_MAX_TOKENS=1200
 ```
 
 如果本地 MinerU FastAPI 启动在 `18000` 端口，例如日志显示 `Start MinerU FastAPI Service: http://0.0.0.0:18000`，请改成：
@@ -93,7 +110,7 @@ curl http://127.0.0.1:8000/health
 
 ## 如何使用服务
 
-当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索”的最小链路。知识库、文档、chunk 和任务状态暂存在内存里，服务重启后会清空；正在运行的 FastAPI `BackgroundTasks` 也绑定当前服务进程，服务停止或热重载后不会自动恢复。后续接 SQLAlchemy 和真正的任务队列时应复用现有业务模型和校验边界。
+当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索 -> rerank -> QA graph”的最小链路。知识库、文档、chunk 和任务状态暂存在内存里，服务重启后会清空；正在运行的 FastAPI `BackgroundTasks` 也绑定当前服务进程，服务停止或热重载后不会自动恢复。后续接 SQLAlchemy 和真正的任务队列时应复用现有业务模型和校验边界。
 
 使用前需要先确保两个外部服务可访问：
 
@@ -101,6 +118,8 @@ curl http://127.0.0.1:8000/health
 - MinerU API：需要提供 `GET /health`、`POST /tasks`、`GET /tasks/{task_id}`、`GET /tasks/{task_id}/result`。
 - Embedding API：OpenAI-compatible `/embeddings`。
 - Milvus：用于保存 chunk 向量和可过滤 scalar 字段。
+- Rerank API：可选，OpenAI-compatible `/rerank`；未配置时自动降级为向量召回顺序。
+- Chat API：使用 `/chat` 时必需，OpenAI-compatible chat completions。
 
 ### 1. 创建知识库
 
@@ -221,7 +240,23 @@ curl -s -X POST "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/reindex"
 curl -s "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/chunks"
 ```
 
-### 7. Metadata 过滤检索
+### 7. 使用 LangGraph 完整入库
+
+如果希望一次执行“解析 -> chunk -> embedding -> Milvus upsert -> 标记 indexed”，可以使用 ingestion graph：
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/ingest"
+```
+
+该接口创建 `ingest` 任务，后台按 LangGraph 节点执行：
+
+```text
+validate_upload -> save_raw_file -> parse_with_mineru -> normalize_markdown -> merge_metadata -> chunk_document -> embed_chunks -> upsert_milvus -> verify_index -> mark_indexed
+```
+
+任一节点失败时会进入 `mark_failed`，任务和文档状态都会记录错误。
+
+### 8. Metadata 过滤检索 + Rerank
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/retrieval/search \
@@ -230,6 +265,7 @@ curl -s -X POST http://127.0.0.1:8000/retrieval/search \
     "kb_id": "'"${KB_ID}"'",
     "query": "报销政策是什么？",
     "top_k": 5,
+    "top_n": 3,
     "filters": {
       "doc_type": {"$eq": "policy"},
       "year": {"$gte": 2024},
@@ -239,7 +275,7 @@ curl -s -X POST http://127.0.0.1:8000/retrieval/search \
   }'
 ```
 
-服务会先用知识库 metadata schema 校验字段、操作符和值类型，再生成 Milvus filter expr。调用方不能传原始 Milvus 表达式。
+服务会先用知识库 metadata schema 校验字段、操作符和值类型，再生成 Milvus filter expr。调用方不能传原始 Milvus 表达式。向量检索取 `top_k`，rerank 后返回 `top_n`；如果没有配置 `RERANK_BASE_URL`/`RERANK_MODEL`，服务会按向量检索原始顺序返回；如果已配置但调用失败，服务同样降级，并在响应中带上 `rerank_error`。
 
 支持的操作符：
 
@@ -255,9 +291,33 @@ $nin
 $contains
 ```
 
-响应包含 `filter_expr` 和 matches。`filter_expr` 会自动附加 `kb_id == "<kb_id>"`，确保检索隔离到当前知识库。
+响应包含 `filter_expr`、`matches` 和可选 `rerank_error`。`filter_expr` 会自动附加 `kb_id == "<kb_id>"`，确保检索隔离到当前知识库。每个 match 会返回 `score`、可选 `rerank_score`、文本、来源和 metadata。
 
-### 8. 删除文档
+### 9. QA Graph 问答
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "kb_id": "'"${KB_ID}"'",
+    "query": "报销政策是什么？",
+    "top_k": 8,
+    "top_n": 4,
+    "filters": {
+      "doc_type": {"$eq": "policy"}
+    }
+  }'
+```
+
+`/chat` 使用 LangGraph 最小 QA flow：
+
+```text
+receive_query -> build_metadata_filter -> retrieve -> rerank -> generate_answer -> return_answer
+```
+
+响应包含 `answer`、`filter_expr`、`citations`、`matches` 和可选 `rerank_error`。使用前必须配置 `CHAT_MODEL`，否则接口返回 `503`。
+
+### 10. 删除文档
 
 ```bash
 curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
@@ -281,14 +341,10 @@ curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 - `POST /documents/{document_id}/parse`
 - `POST /documents/{document_id}/index`
 - `POST /documents/{document_id}/reindex`
+- `POST /documents/{document_id}/ingest`
 - `GET /tasks/{task_id}`
 - `POST /retrieval/search`
-
-已预留但返回 `501`：
-
 - `POST /chat`
-
-`POST /chat` 属于后续 QA graph 模块。
 
 ## Metadata Schema 与 Filter 安全边界
 

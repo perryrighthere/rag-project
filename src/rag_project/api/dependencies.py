@@ -1,8 +1,13 @@
 from functools import lru_cache
 
 from rag_project.core.config import Settings, get_settings
+from rag_project.chat import ChatConfig, OpenAICompatibleChatClient
 from rag_project.embeddings import EmbeddingConfig, OpenAICompatibleEmbeddingClient
+from rag_project.graphs import IngestionGraph, QAGraph
 from rag_project.parsers import ImageExplanationConfig, ImageExplanationGenerator, MinerUApiParser
+from rag_project.rerankers import NoopReranker, OpenAICompatibleReranker, RerankConfig, Reranker
+from rag_project.retrieval import KnowledgeBaseRetriever
+from rag_project.services.memory_store import store
 from rag_project.storage import MinioStorage, MinioStorageConfig
 from rag_project.vectorstores import MilvusVectorStoreAdapter, VectorStoreConfig
 
@@ -72,4 +77,57 @@ def get_vector_store() -> MilvusVectorStoreAdapter:
             uri=settings.milvus_uri,
             collection=settings.milvus_collection,
         )
+    )
+
+
+@lru_cache
+def get_reranker() -> Reranker:
+    settings = get_settings()
+    if settings.rerank_base_url and settings.rerank_model:
+        return OpenAICompatibleReranker(
+            RerankConfig(
+                base_url=settings.rerank_base_url,
+                api_key=settings.rerank_api_key,
+                model=settings.rerank_model,
+                timeout=settings.rerank_timeout,
+            )
+        )
+    return NoopReranker()
+
+
+def get_retriever() -> KnowledgeBaseRetriever:
+    return KnowledgeBaseRetriever(
+        store=store,
+        embedding_client_factory=get_embedding_client,
+        vector_store=get_vector_store(),
+        reranker=get_reranker(),
+    )
+
+
+def get_chat_client() -> OpenAICompatibleChatClient:
+    settings = get_settings()
+    if not settings.chat_model:
+        raise ValueError("CHAT_MODEL must be configured before using /chat")
+    return OpenAICompatibleChatClient(
+        ChatConfig(
+            base_url=settings.chat_base_url,
+            api_key=settings.chat_api_key,
+            model=settings.chat_model,
+            timeout=settings.chat_timeout,
+            temperature=settings.chat_temperature,
+            max_tokens=settings.chat_max_tokens,
+        )
+    )
+
+
+def get_qa_graph() -> QAGraph:
+    return QAGraph(retriever=get_retriever(), chat_client=get_chat_client())
+
+
+def get_ingestion_graph() -> IngestionGraph:
+    return IngestionGraph(
+        store=store,
+        parser=get_parser(),
+        embedding_client_factory=get_embedding_client,
+        vector_store=get_vector_store(),
     )

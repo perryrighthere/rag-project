@@ -46,6 +46,18 @@ class Settings(BaseSettings):
     milvus_uri: str = "http://127.0.0.1:19530"
     milvus_collection: str = "rag_chunks"
 
+    rerank_base_url: str | None = None
+    rerank_api_key: str = "EMPTY"
+    rerank_model: str | None = None
+    rerank_timeout: float = 60.0
+
+    chat_base_url: str | None = None
+    chat_api_key: str = "EMPTY"
+    chat_model: str | None = None
+    chat_timeout: float = 60.0
+    chat_temperature: float = 0.2
+    chat_max_tokens: int = 1200
+
 
 @lru_cache
 def get_settings() -> Settings:
