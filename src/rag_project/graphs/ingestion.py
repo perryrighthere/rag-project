@@ -6,7 +6,7 @@ from rag_project.chunking import ChunkRecord, MarkdownChunker, normalize_markdow
 from rag_project.core.config import get_settings
 from rag_project.embeddings import OpenAICompatibleEmbeddingClient
 from rag_project.parsers import MinerUApiParser, ParseOptions, ParsedDocument, UploadedFile
-from rag_project.services.memory_store import InMemoryStore
+from rag_project.services.store import Store
 from rag_project.vectorstores import MilvusVectorStoreAdapter
 
 
@@ -28,12 +28,12 @@ class IngestionState(TypedDict, total=False):
 
 
 class IngestionGraph:
-    """LangGraph document ingestion workflow for the current in-memory service layer."""
+    """LangGraph document ingestion workflow over the project store contract."""
 
     def __init__(
         self,
         *,
-        store: InMemoryStore,
+        store: Store,
         parser: MinerUApiParser,
         embedding_client_factory: EmbeddingClientFactory,
         vector_store: MilvusVectorStoreAdapter,
@@ -78,14 +78,14 @@ class IngestionGraph:
         return graph
 
     async def _validate_upload(self, state: IngestionState) -> dict[str, Any]:
-        document = self.store.documents.get(state["document_id"])
+        document = self.store.get_document(state["document_id"])
         if document is None:
             raise KeyError(f"Document not found: {state['document_id']}")
         if document.status == "deleted":
             raise ValueError("Deleted documents cannot be ingested")
         if document.file_content is None:
             raise ValueError("Document file content is unavailable")
-        knowledge_base = self.store.knowledge_bases.get(document.kb_id)
+        knowledge_base = self.store.get_knowledge_base(document.kb_id)
         if knowledge_base is None:
             raise KeyError(f"Knowledge base not found: {document.kb_id}")
         knowledge_base.metadata_schema.validate_document_metadata(document.metadata)
@@ -99,7 +99,9 @@ class IngestionGraph:
         return {}
 
     async def _parse_with_mineru(self, state: IngestionState) -> dict[str, Any]:
-        document = self.store.documents[state["document_id"]]
+        document = self.store.get_document(state["document_id"])
+        if document is None:
+            raise KeyError(f"Document not found: {state['document_id']}")
         settings = get_settings()
         assert document.file_content is not None
         options = ParseOptions(
@@ -149,8 +151,12 @@ class IngestionGraph:
         return {"user_metadata": metadata}
 
     async def _chunk_document(self, state: IngestionState) -> dict[str, Any]:
-        document = self.store.documents[state["document_id"]]
-        knowledge_base = self.store.knowledge_bases[state["kb_id"]]
+        document = self.store.get_document(state["document_id"])
+        knowledge_base = self.store.get_knowledge_base(state["kb_id"])
+        if document is None:
+            raise KeyError(f"Document not found: {state['document_id']}")
+        if knowledge_base is None:
+            raise KeyError(f"Knowledge base not found: {state['kb_id']}")
         parsed = state["parsed_document"]
         if parsed is None:
             raise ValueError("parsed_document is missing")
@@ -179,8 +185,12 @@ class IngestionGraph:
         return {"chunks": chunks, "vectors": vectors}
 
     async def _upsert_milvus(self, state: IngestionState) -> dict[str, Any]:
-        document = self.store.documents[state["document_id"]]
-        knowledge_base = self.store.knowledge_bases[state["kb_id"]]
+        document = self.store.get_document(state["document_id"])
+        knowledge_base = self.store.get_knowledge_base(state["kb_id"])
+        if document is None:
+            raise KeyError(f"Document not found: {state['document_id']}")
+        if knowledge_base is None:
+            raise KeyError(f"Knowledge base not found: {state['kb_id']}")
         embedding_client = self.embedding_client_factory()
         chunks = state.get("chunks", [])
         vectors = state.get("vectors", [])
@@ -207,7 +217,9 @@ class IngestionGraph:
         return {}
 
     async def _mark_indexed(self, state: IngestionState) -> dict[str, Any]:
-        document = self.store.documents[state["document_id"]]
+        document = self.store.get_document(state["document_id"])
+        if document is None:
+            raise KeyError(f"Document not found: {state['document_id']}")
         embedding_client = self.embedding_client_factory()
         chunks = self.store.list_document_chunks(document.document_id)
         await self.store.update_document(

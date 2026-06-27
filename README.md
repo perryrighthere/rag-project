@@ -3,6 +3,7 @@
 面向复杂文档的 RAG 服务骨架，当前完成技术规划中 4.1-4.12 的最小闭环：
 
 - FastAPI API 服务与知识库、文档、任务路由。
+- SQLAlchemy 知识库持久化层，默认使用本地 SQLite，生产可切换 PostgreSQL。
 - MinerU HTTP API parser adapter。
 - MinIO 原文与解析产物存储封装。
 - 知识库 metadata schema、文档 metadata 校验与文档状态管理。
@@ -29,7 +30,8 @@ src/rag_project/
   retrieval/  Milvus filter builder、检索与 rerank 编排
   storage/    MinIO 客户端、对象路径约定、Markdown 图片路径重写
   vectorstores/ Milvus collection/upsert/search 封装
-  services/   数据库落地前的开发期内存状态
+  db/         SQLAlchemy models、session、store repository
+  services/   store 契约与测试用内存实现
 ```
 
 ## 配置
@@ -37,6 +39,14 @@ src/rag_project/
 配置可通过环境变量或 `.env` 提供：
 
 ```bash
+cp .env.example .env
+```
+
+```bash
+DATABASE_URL=sqlite+pysqlite:///./rag_project.db
+# PostgreSQL 示例：
+# DATABASE_URL=postgresql+psycopg://rag:rag@localhost:5432/rag
+
 MINIO_ENDPOINT=localhost:9000
 MINIO_ACCESS_KEY=minioadmin
 MINIO_SECRET_KEY=minioadmin
@@ -110,7 +120,9 @@ curl http://127.0.0.1:8000/health
 
 ## 如何使用服务
 
-当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索 -> rerank -> QA graph”的最小链路。知识库、文档、chunk 和任务状态暂存在内存里，服务重启后会清空；正在运行的 FastAPI `BackgroundTasks` 也绑定当前服务进程，服务停止或热重载后不会自动恢复。后续接 SQLAlchemy 和真正的任务队列时应复用现有业务模型和校验边界。
+当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索 -> rerank -> QA graph”的最小链路。知识库、文档、chunk 和任务状态通过 SQLAlchemy 保存到关系数据库。默认 `DATABASE_URL` 是本地 SQLite 文件 `sqlite+pysqlite:///./rag_project.db`；生产环境建议配置 PostgreSQL，例如 `postgresql+psycopg://rag:rag@localhost:5432/rag`。
+
+应用启动时会通过 SQLAlchemy `create_all` 创建缺失表，便于本地开发和最小部署。后续进入生产迁移治理时，应把同一组 ORM model 接入 Alembic revision。正在运行的 FastAPI `BackgroundTasks` 仍绑定当前服务进程；服务停止、`uvicorn --reload` 触发重启或多进程 worker 切换后，任务记录会保留在数据库中，但后台执行本身不会自动恢复。真正的可恢复任务队列可在后续复用现有 task 表和 LangGraph state 契约继续接入。
 
 使用前需要先确保两个外部服务可访问：
 
@@ -157,7 +169,7 @@ curl -s -X POST "http://127.0.0.1:8000/knowledge-bases/${KB_ID}/documents" \
   -F 'metadata={"doc_type":"policy","department":"finance","year":2025,"tags":["travel"]}'
 ```
 
-响应中会返回 `document_id`。当前实现会把上传文件内容暂存在内存里，真正写入 MinIO 发生在解析任务启动后。
+响应中会返回 `document_id`。当前实现会把上传文件内容随文档记录保存到数据库，以便后续后台解析任务读取；真正写入 MinIO 发生在解析任务启动后。大文件生产部署建议进一步调整为“上传即写 MinIO，数据库只保存 raw object key”。
 
 ### 3. 启动 MinerU 解析
 
@@ -191,7 +203,7 @@ curl -s "http://127.0.0.1:8000/tasks/${TASK_ID}"
 - `succeeded`：解析成功，`result` 中包含 `ParsedDocument`。
 - `failed`：解析失败，`error` 中包含失败原因。
 
-`POST /documents/{document_id}/parse` 返回 `202` 时，响应里的任务状态可能仍是 `pending`，这是任务刚创建时的快照。后台任务会在响应返回后开始执行，并把任务状态更新为 `running`。如果服务进程停止、`uvicorn --reload` 触发重启或多进程 worker 切换，当前内存任务不会自动恢复，已提交到 MinerU 的外部任务也不会被本服务继续追踪。
+`POST /documents/{document_id}/parse` 返回 `202` 时，响应里的任务状态可能仍是 `pending`，这是任务刚创建时的快照。后台任务会在响应返回后开始执行，并把任务状态更新为 `running`。如果服务进程停止、`uvicorn --reload` 触发重启或多进程 worker 切换，任务状态仍保存在数据库中，但当前进程内的后台执行不会自动恢复，已提交到 MinerU 的外部任务也不会被本服务继续追踪。
 
 ### 5. 查询文档和解析结果
 
@@ -234,7 +246,7 @@ curl -s -X POST "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/index"
 curl -s -X POST "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/reindex"
 ```
 
-查询当前内存中的 chunks：
+查询当前数据库中的 chunks：
 
 ```bash
 curl -s "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/chunks"
@@ -323,7 +335,7 @@ receive_query -> build_metadata_filter -> retrieve -> rerank -> generate_answer 
 curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 ```
 
-当前删除只会把内存中的文档状态标记为 `deleted`，不会删除 MinIO 对象。对象生命周期管理会在后续存储治理模块中完善。
+当前删除只会把数据库中的文档状态标记为 `deleted`，不会删除 MinIO 对象或 Milvus chunk。对象生命周期管理和向量删除治理会在后续存储治理模块中完善。
 
 ## API 状态
 

@@ -2,12 +2,12 @@ from functools import lru_cache
 
 from rag_project.core.config import Settings, get_settings
 from rag_project.chat import ChatConfig, OpenAICompatibleChatClient
+from rag_project.db import get_store
 from rag_project.embeddings import EmbeddingConfig, OpenAICompatibleEmbeddingClient
 from rag_project.graphs import IngestionGraph, QAGraph
 from rag_project.parsers import ImageExplanationConfig, ImageExplanationGenerator, MinerUApiParser
 from rag_project.rerankers import NoopReranker, OpenAICompatibleReranker, RerankConfig, Reranker
 from rag_project.retrieval import KnowledgeBaseRetriever
-from rag_project.services.memory_store import store
 from rag_project.storage import MinioStorage, MinioStorageConfig
 from rag_project.vectorstores import MilvusVectorStoreAdapter, VectorStoreConfig
 
@@ -97,7 +97,7 @@ def get_reranker() -> Reranker:
 
 def get_retriever() -> KnowledgeBaseRetriever:
     return KnowledgeBaseRetriever(
-        store=store,
+        store=get_store(),
         embedding_client_factory=get_embedding_client,
         vector_store=get_vector_store(),
         reranker=get_reranker(),
@@ -126,7 +126,7 @@ def get_qa_graph() -> QAGraph:
 
 def get_ingestion_graph() -> IngestionGraph:
     return IngestionGraph(
-        store=store,
+        store=get_store(),
         parser=get_parser(),
         embedding_client_factory=get_embedding_client,
         vector_store=get_vector_store(),

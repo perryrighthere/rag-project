@@ -7,7 +7,7 @@ from rag_project.embeddings import OpenAICompatibleEmbeddingClient
 from rag_project.knowledge_base import MetadataSchema
 from rag_project.rerankers import Reranker
 from rag_project.retrieval.filters import MilvusFilterBuilder
-from rag_project.services.memory_store import InMemoryStore
+from rag_project.services.store import Store
 from rag_project.vectorstores import MilvusSearchMatch, MilvusVectorStoreAdapter
 
 
@@ -42,7 +42,7 @@ class KnowledgeBaseRetriever:
     def __init__(
         self,
         *,
-        store: InMemoryStore,
+        store: Store,
         embedding_client_factory: EmbeddingClientFactory,
         vector_store: MilvusVectorStoreAdapter,
         reranker: Reranker,
@@ -55,7 +55,7 @@ class KnowledgeBaseRetriever:
         self.filter_builder = filter_builder or MilvusFilterBuilder()
 
     def metadata_schema_for(self, kb_id: str) -> MetadataSchema:
-        knowledge_base = self.store.knowledge_bases.get(kb_id)
+        knowledge_base = self.store.get_knowledge_base(kb_id)
         if knowledge_base is None:
             raise KeyError(f"Knowledge base not found: {kb_id}")
         return knowledge_base.metadata_schema

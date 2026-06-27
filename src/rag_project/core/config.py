@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     app_name: str = "rag-project"
     app_env: str = "local"
     api_prefix: str = ""
+    database_url: str = "sqlite+pysqlite:///./rag_project.db"
 
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"

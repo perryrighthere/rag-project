@@ -20,6 +20,18 @@ class InMemoryStore:
             self.knowledge_bases[record.kb_id] = record
             return record
 
+    def list_knowledge_bases(self) -> list[KnowledgeBaseRecord]:
+        return list(self.knowledge_bases.values())
+
+    def get_knowledge_base(self, kb_id: str) -> KnowledgeBaseRecord | None:
+        return self.knowledge_bases.get(kb_id)
+
+    def get_document(self, document_id: str) -> DocumentRecord | None:
+        return self.documents.get(document_id)
+
+    def get_task(self, task_id: str) -> TaskRecord | None:
+        return self.tasks.get(task_id)
+
     async def update_knowledge_base(self, kb_id: str, **changes) -> KnowledgeBaseRecord | None:
         async with self._lock:
             record = self.knowledge_bases.get(kb_id)
