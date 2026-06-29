@@ -42,19 +42,18 @@ src/rag_project/
 cp .env.example .env
 ```
 
+默认 Docker Compose 本地依赖栈会由 `docker-compose.local.yml` 注入 PostgreSQL、Milvus 和 MinIO 的容器内地址。`.env` 主要用于模型 API、端口和外部服务覆盖。
+
 ```bash
-DATABASE_URL=sqlite+pysqlite:///./rag_project.db
-# PostgreSQL 示例：
-# DATABASE_URL=postgresql+psycopg://rag:rag@localhost:5432/rag
+APP_PORT=8000
 
-MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=rag-project
-MINIO_SECURE=false
-MINIO_PUBLIC_ENDPOINT=http://localhost:9000
+# Docker Compose local dependencies leave these unset.
+# App-only mode can override them to external services:
+# DATABASE_URL=postgresql+psycopg://rag:rag@host.docker.internal:5432/rag
+# MILVUS_URI=http://host.docker.internal:19530
+# MINIO_ENDPOINT=host.docker.internal:9000
 
-MINERU_BASE_URL=http://localhost:8001
+MINERU_BASE_URL=http://host.docker.internal:18000
 MINERU_BACKEND=pipeline
 MINERU_PARSE_METHOD=auto
 MINERU_LANG_LIST='["ch"]'
@@ -76,7 +75,6 @@ EMBEDDING_DIM=1024
 EMBEDDING_BATCH_SIZE=32
 EMBEDDING_TIMEOUT=60
 
-MILVUS_URI=http://127.0.0.1:19530
 MILVUS_COLLECTION=rag_chunks
 
 RERANK_BASE_URL=https://your-openai-compatible-provider.example.com/v1
@@ -92,10 +90,10 @@ CHAT_TEMPERATURE=0.2
 CHAT_MAX_TOKENS=1200
 ```
 
-如果本地 MinerU FastAPI 启动在 `18000` 端口，例如日志显示 `Start MinerU FastAPI Service: http://0.0.0.0:18000`，请改成：
+如果不在 Docker 容器中运行应用，而是在宿主机直接执行 `uvicorn`，本地服务地址可以使用 `localhost` 或 `127.0.0.1`。如果应用在容器里、MinerU 在宿主机上，通常应使用 `host.docker.internal`：
 
 ```bash
-MINERU_BASE_URL=http://127.0.0.1:18000
+MINERU_BASE_URL=http://host.docker.internal:18000
 ```
 
 ## 运行
@@ -118,9 +116,52 @@ curl http://127.0.0.1:8000/health
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
 
+## Docker Compose
+
+默认本地运行方式会启动应用、PostgreSQL、MinIO、etcd 和 Milvus standalone：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+```
+
+常用访问地址：
+
+- API: `http://127.0.0.1:8000`
+- Swagger UI: `http://127.0.0.1:8000/docs`
+- MinIO API: `http://127.0.0.1:9000`
+- MinIO Console: `http://127.0.0.1:9001`
+- PostgreSQL: `127.0.0.1:5432`
+- Milvus: `127.0.0.1:19530`
+
+只运行应用并连接外部 PostgreSQL、Milvus 和 MinIO 时，只使用基础 compose 文件，并在 `.env` 中覆盖外部地址：
+
+```bash
+docker compose up --build app
+```
+
+```bash
+DATABASE_URL=postgresql+psycopg://rag:rag@host.docker.internal:5432/rag
+MILVUS_URI=http://host.docker.internal:19530
+MINIO_ENDPOINT=host.docker.internal:9000
+MINIO_PUBLIC_ENDPOINT=http://localhost:9000
+MINERU_BASE_URL=http://host.docker.internal:18000
+```
+
+停止并移除本地依赖栈：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml down
+```
+
+同时删除本地数据卷：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml down -v
+```
+
 ## 如何使用服务
 
-当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索 -> rerank -> QA graph”的最小链路。知识库、文档、chunk 和任务状态通过 SQLAlchemy 保存到关系数据库。默认 `DATABASE_URL` 是本地 SQLite 文件 `sqlite+pysqlite:///./rag_project.db`；生产环境建议配置 PostgreSQL，例如 `postgresql+psycopg://rag:rag@localhost:5432/rag`。
+当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索 -> rerank -> QA graph”的最小链路。Docker Compose 本地依赖栈默认使用 PostgreSQL 保存知识库、文档、chunk 和任务状态，使用 Milvus 保存向量索引，使用 MinIO 保存原始文件和解析产物。生产环境建议把 PostgreSQL、MinIO 和 Milvus 单独部署或使用托管服务，再通过环境变量让 app 连接外部服务。
 
 应用启动时会通过 SQLAlchemy `create_all` 创建缺失表，便于本地开发和最小部署。后续进入生产迁移治理时，应把同一组 ORM model 接入 Alembic revision。正在运行的 FastAPI `BackgroundTasks` 仍绑定当前服务进程；服务停止、`uvicorn --reload` 触发重启或多进程 worker 切换后，任务记录会保留在数据库中，但后台执行本身不会自动恢复。真正的可恢复任务队列可在后续复用现有 task 表和 LangGraph state 契约继续接入。
 
