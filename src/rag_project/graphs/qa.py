@@ -5,6 +5,7 @@ from langchain_core.documents import Document
 from langgraph.graph import END, StateGraph
 
 from rag_project.chat import OpenAICompatibleChatClient
+from rag_project.qa import QAOrchestratorName, create_qa_orchestrator
 from rag_project.retrieval import KnowledgeBaseRetriever
 
 
@@ -14,12 +15,16 @@ class QAState(TypedDict, total=False):
     filters: dict[str, Any]
     top_k: int
     top_n: int
+    orchestrator: QAOrchestratorName
+    include_agent_trace: bool
     filter_expr: str
     candidates: list[Document]
     reranked: list[Document]
     context: str
     answer: str
     citations: list[dict[str, Any]]
+    agent_trace: list[dict[str, Any]]
+    review_notes: str | None
     rerank_error: str | None
     error: str | None
 
@@ -32,14 +37,26 @@ class QAResult:
     citations: list[dict[str, Any]] = field(default_factory=list)
     reranked_documents: list[Document] = field(default_factory=list)
     rerank_error: str | None = None
+    orchestrator: QAOrchestratorName = "single"
+    agent_trace: list[dict[str, Any]] = field(default_factory=list)
+    review_notes: str | None = None
 
 
 class QAGraph:
     """Minimal LangGraph QA workflow for metadata-filtered retrieval and answer generation."""
 
-    def __init__(self, *, retriever: KnowledgeBaseRetriever, chat_client: OpenAICompatibleChatClient):
+    def __init__(
+        self,
+        *,
+        retriever: KnowledgeBaseRetriever,
+        chat_client: OpenAICompatibleChatClient,
+        default_orchestrator: QAOrchestratorName = "single",
+        agent_max_rounds: int = 3,
+    ):
         self.retriever = retriever
         self.chat_client = chat_client
+        self.default_orchestrator = default_orchestrator
+        self.agent_max_rounds = max(1, agent_max_rounds)
         self._app = self._build_graph().compile()
 
     async def run(
@@ -50,8 +67,11 @@ class QAGraph:
         filters: dict[str, Any],
         top_k: int,
         top_n: int | None = None,
+        orchestrator: QAOrchestratorName | None = None,
+        include_agent_trace: bool = False,
     ) -> QAResult:
         limit = min(top_n or top_k, top_k)
+        selected_orchestrator = orchestrator or self.default_orchestrator
         state = await self._app.ainvoke(
             {
                 "kb_id": kb_id,
@@ -59,6 +79,8 @@ class QAGraph:
                 "filters": filters,
                 "top_k": top_k,
                 "top_n": limit,
+                "orchestrator": selected_orchestrator,
+                "include_agent_trace": include_agent_trace,
             }
         )
         return QAResult(
@@ -68,6 +90,9 @@ class QAGraph:
             citations=list(state.get("citations") or []),
             reranked_documents=list(state.get("reranked") or []),
             rerank_error=state.get("rerank_error"),
+            orchestrator=selected_orchestrator,
+            agent_trace=list(state.get("agent_trace") or []),
+            review_notes=state.get("review_notes"),
         )
 
     def _build_graph(self) -> StateGraph:
@@ -123,11 +148,21 @@ class QAGraph:
         }
 
     async def _generate_answer(self, state: QAState) -> dict[str, Any]:
-        answer = await self.chat_client.generate_answer(
+        orchestrator = create_qa_orchestrator(
+            name=state.get("orchestrator") or self.default_orchestrator,
+            chat_client=self.chat_client,
+            max_rounds=self.agent_max_rounds,
+        )
+        result = await orchestrator.answer(
             query=state["query"],
             documents=list(state.get("reranked") or []),
+            citations=list(state.get("citations") or []),
         )
-        return {"answer": answer}
+        return {
+            "answer": result.answer,
+            "review_notes": result.review_notes,
+            "agent_trace": [step.to_dict() for step in result.agent_trace] if state.get("include_agent_trace") else [],
+        }
 
     async def _return_answer(self, state: QAState) -> dict[str, Any]:
         return state

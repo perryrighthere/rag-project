@@ -121,7 +121,13 @@ def get_chat_client() -> OpenAICompatibleChatClient:
 
 
 def get_qa_graph() -> QAGraph:
-    return QAGraph(retriever=get_retriever(), chat_client=get_chat_client())
+    settings = get_settings()
+    return QAGraph(
+        retriever=get_retriever(),
+        chat_client=get_chat_client(),
+        default_orchestrator=settings.qa_orchestrator,
+        agent_max_rounds=settings.qa_agent_max_rounds,
+    )
 
 
 def get_ingestion_graph() -> IngestionGraph:

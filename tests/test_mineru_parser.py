@@ -113,3 +113,64 @@ async def test_submit_task_uses_mineru_files_field() -> None:
     assert client.calls[0]["path"] == "/tasks"
     assert client.calls[0]["files"][0][0] == "files"
     assert client.calls[0]["files"][0][1] == ("demo.pdf", b"%PDF", "application/pdf")
+
+
+@pytest.mark.asyncio
+async def test_parse_reports_progress_after_mineru_submit(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, payload=None, content=b""):
+            self._payload = payload or {}
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, path):
+            if path == "/health":
+                return FakeResponse({"status": "healthy"})
+            if path == "/tasks/mineru_task_1":
+                return FakeResponse({"status": "completed"})
+            if path == "/tasks/mineru_task_1/result":
+                return FakeResponse(content=build_zip())
+            raise AssertionError(f"unexpected GET {path}")
+
+        async def post(self, path, *, data, files):
+            assert path == "/tasks"
+            return FakeResponse({"task_id": "mineru_task_1"})
+
+    events = []
+    storage = FakeStorage()
+    parser = MinerUApiParser(base_url="http://mineru", storage=storage)
+    monkeypatch.setattr("rag_project.parsers.mineru.httpx.AsyncClient", FakeClient)
+
+    async def record_progress(stage, details):
+        events.append((stage, details))
+
+    parsed = await parser.parse(
+        UploadedFile(filename="demo.pdf", content=b"%PDF", content_type="application/pdf"),
+        ParseOptions(kb_id="kb", document_id="doc"),
+        progress_callback=record_progress,
+    )
+
+    assert parsed.parser_task_id == "mineru_task_1"
+    assert [stage for stage, _ in events] == [
+        "raw_saved",
+        "mineru_submitted",
+        "mineru_finished",
+        "result_downloaded",
+        "artifacts_persisted",
+    ]
+    assert events[1][1]["parser_task_id"] == "mineru_task_1"

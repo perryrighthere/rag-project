@@ -3,6 +3,7 @@ import base64
 import json
 import mimetypes
 import zipfile
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import PurePosixPath
@@ -25,6 +26,9 @@ from rag_project.storage import (
 
 class MinerUApiError(RuntimeError):
     pass
+
+
+ParseProgressCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class MinerUApiParser(DocumentParser):
@@ -50,18 +54,42 @@ class MinerUApiParser(DocumentParser):
         self.max_wait_seconds = max_wait_seconds
         self.image_explainer = image_explainer
 
-    async def parse(self, file: UploadedFile, options: ParseOptions) -> ParsedDocument:
+    async def parse(
+        self,
+        file: UploadedFile,
+        options: ParseOptions,
+        progress_callback: ParseProgressCallback | None = None,
+    ) -> ParsedDocument:
         filename = sanitize_object_part(file.filename)
         raw_key = build_raw_object_key(options.kb_id, options.document_id, filename)
         await self.storage.put_bytes(raw_key, file.content, file.content_type)
+        if progress_callback is not None:
+            await progress_callback("raw_saved", {"raw_object_key": raw_key})
 
         async with httpx.AsyncClient(base_url=self.base_url, timeout=self.request_timeout) as client:
             await self._check_health(client)
             parser_task_id = await self._submit_task(client, file, options)
+            if progress_callback is not None:
+                await progress_callback(
+                    "mineru_submitted",
+                    {"parser_task_id": parser_task_id, "raw_object_key": raw_key},
+                )
             await self._wait_for_task(client, parser_task_id)
+            if progress_callback is not None:
+                await progress_callback("mineru_finished", {"parser_task_id": parser_task_id})
             zip_payload = await self._download_result_zip(client, parser_task_id)
+            if progress_callback is not None:
+                await progress_callback("result_downloaded", {"parser_task_id": parser_task_id})
 
         artifacts = await self._persist_zip_artifacts(zip_payload, filename, options)
+        if progress_callback is not None:
+            await progress_callback(
+                "artifacts_persisted",
+                {
+                    "parser_task_id": parser_task_id,
+                    "markdown_object_key": artifacts["markdown_object_key"],
+                },
+            )
         return ParsedDocument(
             document_id=options.document_id,
             parser="mineru",

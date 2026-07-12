@@ -12,7 +12,7 @@
 - Milvus chunk upsert/search 适配器。
 - 安全的 metadata filter builder，用户不能直接传 Milvus expr。
 - OpenAI-compatible rerank adapter，未配置时按向量召回顺序降级。
-- LangGraph QA graph 与 ingestion graph。
+- LangGraph QA graph、可插拔 QA orchestrator 与 ingestion graph。
 
 ## 目录
 
@@ -26,6 +26,7 @@ src/rag_project/
   graphs/     LangGraph QA 与文档入库工作流
   knowledge_base/ metadata schema 与校验
   parsers/    DocumentParser 抽象与 MinerUApiParser
+  qa/         single、LangGraph multi-agent、CrewAI、AutoGen QA 编排
   rerankers/  OpenAI-compatible rerank adapter 与降级实现
   retrieval/  Milvus filter builder、检索与 rerank 编排
   storage/    MinIO 客户端、对象路径约定、Markdown 图片路径重写
@@ -88,6 +89,9 @@ CHAT_MODEL=chat-model
 CHAT_TIMEOUT=60
 CHAT_TEMPERATURE=0.2
 CHAT_MAX_TOKENS=1200
+
+QA_ORCHESTRATOR=single
+QA_AGENT_MAX_ROUNDS=3
 ```
 
 如果不在 Docker 容器中运行应用，而是在宿主机直接执行 `uvicorn`，本地服务地址可以使用 `localhost` 或 `127.0.0.1`。如果应用在容器里、MinerU 在宿主机上，通常应使用 `host.docker.internal`：
@@ -103,6 +107,12 @@ python -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
 PYTHONPATH=src uvicorn rag_project.main:app --reload
+```
+
+如果要使用可选的 CrewAI 或 AutoGen QA 编排模式，再安装：
+
+```bash
+python -m pip install -r requirements-agentic.txt
 ```
 
 健康检查：
@@ -244,7 +254,7 @@ curl -s "http://127.0.0.1:8000/tasks/${TASK_ID}"
 - `succeeded`：解析成功，`result` 中包含 `ParsedDocument`。
 - `failed`：解析失败，`error` 中包含失败原因。
 
-`POST /documents/{document_id}/parse` 返回 `202` 时，响应里的任务状态可能仍是 `pending`，这是任务刚创建时的快照。后台任务会在响应返回后开始执行，并把任务状态更新为 `running`。如果服务进程停止、`uvicorn --reload` 触发重启或多进程 worker 切换，任务状态仍保存在数据库中，但当前进程内的后台执行不会自动恢复，已提交到 MinerU 的外部任务也不会被本服务继续追踪。
+`POST /documents/{document_id}/parse` 返回 `202` 时，响应里的任务状态可能仍是 `pending`，这是任务刚创建时的快照。后台任务会在响应返回后开始执行，并把任务状态更新为 `running`。如果服务进程停止、`uvicorn --reload` 触发重启或多进程 worker 切换，当前进程内的后台执行不会自动恢复；应用下次启动时会把上一次遗留的 `pending`/`running` 任务标记为 `failed`，避免任务永久停留在 `running`。解析任务提交 MinerU 后，会在 task `result.stage` 中记录阶段信息和 `parser_task_id`，便于排查卡在提交、轮询、结果下载还是产物持久化。
 
 ### 5. 查询文档和解析结果
 
@@ -362,13 +372,40 @@ curl -s -X POST http://127.0.0.1:8000/chat \
   }'
 ```
 
-`/chat` 使用 LangGraph 最小 QA flow：
+`/chat` 使用 LangGraph QA flow，并在 `generate_answer` 节点接入可插拔 QA orchestrator：
 
 ```text
 receive_query -> build_metadata_filter -> retrieve -> rerank -> generate_answer -> return_answer
 ```
 
-响应包含 `answer`、`filter_expr`、`citations`、`matches` 和可选 `rerank_error`。使用前必须配置 `CHAT_MODEL`，否则接口返回 `503`。
+默认 `QA_ORCHESTRATOR=single`，保持原有单次答案生成行为。也可以在请求中覆盖：
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "kb_id": "'"${KB_ID}"'",
+    "query": "报销政策是什么？",
+    "top_k": 8,
+    "top_n": 4,
+    "orchestrator": "langgraph_multi",
+    "include_agent_trace": true,
+    "filters": {
+      "doc_type": {"$eq": "policy"}
+    }
+  }'
+```
+
+支持的 orchestrator：
+
+```text
+single
+langgraph_multi
+crewai
+autogen
+```
+
+`langgraph_multi` 不需要额外依赖。`crewai` 和 `autogen` 需要先安装 `requirements-agentic.txt`，否则接口返回 `503`。响应包含 `answer`、`filter_expr`、`citations`、`matches`、`orchestrator`、可选 `review_notes` 和可选 `agent_trace`；`include_agent_trace=false` 时默认不返回中间步骤。使用前必须配置 `CHAT_MODEL`，否则接口返回 `503`。
 
 ### 10. 删除文档
 

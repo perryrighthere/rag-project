@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, HttpUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -58,6 +59,9 @@ class Settings(BaseSettings):
     chat_timeout: float = 60.0
     chat_temperature: float = 0.2
     chat_max_tokens: int = 1200
+
+    qa_orchestrator: Literal["single", "langgraph_multi", "crewai", "autogen"] = "single"
+    qa_agent_max_rounds: int = 3
 
 
 @lru_cache

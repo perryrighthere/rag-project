@@ -1,0 +1,5 @@
+# Optional multi-agent QA orchestrators.
+# Install alongside requirements.txt only when using QA_ORCHESTRATOR=crewai or autogen.
+crewai>=1.14.0,<2.0.0
+autogen-agentchat>=0.7.0,<1.0.0
+autogen-ext[openai]>=0.7.0,<1.0.0

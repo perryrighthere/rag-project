@@ -30,6 +30,7 @@ from rag_project.db import get_store
 from rag_project.embeddings import OpenAICompatibleEmbeddingClient
 from rag_project.knowledge_base import MetadataValidationError
 from rag_project.parsers import MinerUApiParser, ParseOptions, UploadedFile as ParserUploadedFile
+from rag_project.qa import QAOrchestratorError
 from rag_project.vectorstores import MilvusVectorStoreAdapter
 
 
@@ -252,11 +253,15 @@ async def chat(payload: ChatRequest) -> ChatResponse:
             filters=payload.filters,
             top_k=payload.top_k,
             top_n=payload.top_n,
+            orchestrator=payload.orchestrator,
+            include_agent_trace=payload.include_agent_trace,
         )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found") from exc
     except MetadataValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except QAOrchestratorError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
@@ -266,6 +271,9 @@ async def chat(payload: ChatRequest) -> ChatResponse:
         filter_expr=result.filter_expr,
         citations=result.citations,
         rerank_error=result.rerank_error,
+        orchestrator=result.orchestrator,
+        agent_trace=result.agent_trace,
+        review_notes=result.review_notes,
         matches=[
             RetrievalMatch(
                 chunk_id=str(document.metadata.get("chunk_id") or ""),
@@ -292,6 +300,12 @@ async def _run_parse_task(task_id: str, document_id: str, parser: MinerUApiParse
     settings = get_settings()
     assert document.file_content is not None
     await _store().update_task(task_id, status="running")
+
+    async def record_progress(stage: str, details: dict) -> None:
+        await _store().update_task(task_id, result={"stage": stage, **details})
+        if raw_object_key := details.get("raw_object_key"):
+            await _store().update_document(document_id, raw_object_key=raw_object_key)
+
     try:
         parsed = await parser.parse(
             ParserUploadedFile(
@@ -306,6 +320,7 @@ async def _run_parse_task(task_id: str, document_id: str, parser: MinerUApiParse
                 parse_method=settings.mineru_parse_method,
                 lang_list=settings.mineru_lang_list,
             ),
+            progress_callback=record_progress,
         )
         await _store().update_document(
             document_id,

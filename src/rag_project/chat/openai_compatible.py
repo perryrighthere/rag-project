@@ -33,6 +33,9 @@ class OpenAICompatibleChatClient:
 
     async def generate_answer(self, *, query: str, documents: list[Document]) -> str:
         prompt = _build_prompt(query, documents)
+        return await self.generate_text(prompt)
+
+    async def generate_text(self, prompt: str) -> str:
         response = await self._chat.ainvoke([HumanMessage(content=prompt)])
         return _normalize_content(response.content)
 

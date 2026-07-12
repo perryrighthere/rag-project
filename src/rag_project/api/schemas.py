@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from rag_project.chunking import ChunkRecord, ChunkingConfig
 from rag_project.knowledge_base import MetadataSchema
 from rag_project.parsers import ParsedDocument
+from rag_project.qa import QAOrchestratorName
 
 
 DocumentStatus = Literal["uploaded", "parsing", "parsed", "chunking", "embedding", "indexed", "failed", "deleted"]
@@ -110,6 +111,8 @@ class ChatRequest(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
     top_k: int = Field(default=10, ge=1, le=100)
     top_n: int | None = Field(default=None, ge=1, le=100)
+    orchestrator: QAOrchestratorName | None = None
+    include_agent_trace: bool = False
 
 
 class ChatCitation(BaseModel):
@@ -130,3 +133,6 @@ class ChatResponse(BaseModel):
     citations: list[ChatCitation] = Field(default_factory=list)
     matches: list[RetrievalMatch] = Field(default_factory=list)
     rerank_error: str | None = None
+    orchestrator: QAOrchestratorName = "single"
+    agent_trace: list[dict[str, Any]] = Field(default_factory=list)
+    review_notes: str | None = None
