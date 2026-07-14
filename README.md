@@ -1,20 +1,37 @@
 # RAG Project
 
-面向复杂文档的 RAG 服务骨架，当前完成技术规划中 4.1-4.12 的最小闭环：
+面向复杂文档处理与知识检索的 RAG 服务，提供从文档解析、结构化切分和向量索引，到元数据过滤检索、重排序与引用式问答的完整能力。
 
-- FastAPI API 服务与知识库、文档、任务路由。
-- SQLAlchemy 知识库持久化层，默认使用本地 SQLite，生产可切换 PostgreSQL。
-- MinerU HTTP API parser adapter。
-- MinIO 原文与解析产物存储封装。
-- 知识库 metadata schema、文档 metadata 校验与文档状态管理。
-- Markdown chunking 与 LangChain `Document` 转换。
-- OpenAI-compatible Embedding 封装与维度校验。
-- Milvus chunk upsert/search 适配器。
-- 安全的 metadata filter builder，用户不能直接传 Milvus expr。
-- OpenAI-compatible rerank adapter，未配置时按向量召回顺序降级。
-- LangGraph QA graph、可插拔 QA orchestrator 与 ingestion graph。
+## 核心能力
 
-## 目录
+- **知识库管理**：通过 FastAPI 管理知识库、文档、任务及检索问答接口。
+- **复杂文档解析**：集成 MinerU HTTP API，支持 Markdown、图片及结构化 JSON 产物。
+- **对象存储**：使用 MinIO 统一保存原始文件和解析产物，并重写文档中的图片地址。
+- **结构化切分**：结合 Markdown 标题层级与递归切分策略生成语义完整的 Chunk。
+- **向量索引**：接入 OpenAI-compatible Embedding API，并通过 Milvus 提供向量写入和检索。
+- **元数据治理**：支持知识库级 Metadata Schema、文档元数据校验及安全的 Milvus Filter 构造。
+- **检索增强**：集成 OpenAI-compatible Rerank API；服务不可用时自动降级为向量召回顺序。
+- **问答编排**：使用 LangGraph 编排入库与 QA 工作流，支持单模型及多 Agent 问答模式。
+- **持久化**：通过 SQLAlchemy 保存知识库、文档、Chunk 和任务状态，支持 SQLite 与 PostgreSQL。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    Client["API Client"] --> API["FastAPI"]
+    API --> DB["PostgreSQL / SQLite"]
+    API --> Ingest["LangGraph Ingestion"]
+    Ingest --> MinerU["MinerU"]
+    Ingest --> MinIO["MinIO"]
+    Ingest --> Embedding["Embedding API"]
+    Embedding --> Milvus["Milvus"]
+    API --> QA["LangGraph QA"]
+    QA --> Milvus
+    QA --> Rerank["Rerank API"]
+    QA --> Chat["Chat API"]
+```
+
+## 项目结构
 
 ```text
 src/rag_project/
@@ -169,13 +186,20 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml down
 docker compose -f docker-compose.yml -f docker-compose.local.yml down -v
 ```
 
-## 如何使用服务
+## 使用指南
 
-当前服务完成的是“上传文档 -> 调用 MinerU 解析 -> 保存解析产物到 MinIO -> chunking -> embedding -> 写入 Milvus -> metadata 过滤检索 -> rerank -> QA graph”的最小链路。Docker Compose 本地依赖栈默认使用 PostgreSQL 保存知识库、文档、chunk 和任务状态，使用 Milvus 保存向量索引，使用 MinIO 保存原始文件和解析产物。生产环境建议把 PostgreSQL、MinIO 和 Milvus 单独部署或使用托管服务，再通过环境变量让 app 连接外部服务。
+服务覆盖以下处理链路：
 
-应用启动时会通过 SQLAlchemy `create_all` 创建缺失表，便于本地开发和最小部署。后续进入生产迁移治理时，应把同一组 ORM model 接入 Alembic revision。正在运行的 FastAPI `BackgroundTasks` 仍绑定当前服务进程；服务停止、`uvicorn --reload` 触发重启或多进程 worker 切换后，任务记录会保留在数据库中，但后台执行本身不会自动恢复。真正的可恢复任务队列可在后续复用现有 task 表和 LangGraph state 契约继续接入。
+```text
+上传文档 → MinerU 解析 → MinIO 产物持久化 → Chunking → Embedding
+→ Milvus 索引 → Metadata 过滤检索 → Rerank → QA
+```
 
-使用前需要先确保两个外部服务可访问：
+Docker Compose 本地依赖栈使用 PostgreSQL 保存知识库、文档、Chunk 和任务状态，使用 Milvus 保存向量索引，使用 MinIO 保存原始文件及解析产物。生产环境应独立部署或采用托管的 PostgreSQL、MinIO 和 Milvus，并通过环境变量配置服务地址及访问凭据。
+
+应用启动时通过 SQLAlchemy `create_all` 创建缺失表，适用于本地开发和轻量部署。生产环境应使用 Alembic 管理数据库结构变更。异步任务目前由 FastAPI `BackgroundTasks` 执行并与应用进程绑定：进程停止、热重载或 Worker 切换后，数据库中的任务记录仍会保留，但执行过程不会自动恢复；应用重启时会将遗留的 `pending` 和 `running` 任务标记为 `failed`。对任务可靠性有严格要求的部署应接入独立任务队列及持久化工作流状态。
+
+使用前需要确保以下外部服务可访问：
 
 - MinIO：用于保存原始文件、Markdown、图片和 JSON。
 - MinerU API：需要提供 `GET /health`、`POST /tasks`、`GET /tasks/{task_id}`、`GET /tasks/{task_id}/result`。
@@ -273,7 +297,7 @@ curl -s "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 
 这些 object key 对应 MinIO 中的对象；Markdown 内的图片引用会指向 `MINIO_PUBLIC_ENDPOINT` 或 `MINIO_ENDPOINT` 生成的 HTTP URL。
 
-如果启用了 VLM 图片解释，`parsed_document.markdown_text` 会在图片行后追加引用块形式的图片说明，`parsed_document.image_explanation_chunks` 会返回图片说明的独立 chunk，供后续 4.5 chunking 和索引流程接入。
+如果启用了 VLM 图片解释，`parsed_document.markdown_text` 会在图片行后追加引用块形式的图片说明，`parsed_document.image_explanation_chunks` 会返回独立的图片说明 Chunk，并随文档正文参与索引。
 
 ### 6. 启动索引
 
@@ -413,11 +437,9 @@ autogen
 curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 ```
 
-当前删除只会把数据库中的文档状态标记为 `deleted`，不会删除 MinIO 对象或 Milvus chunk。对象生命周期管理和向量删除治理会在后续存储治理模块中完善。
+删除接口执行逻辑删除，仅将数据库中的文档状态标记为 `deleted`，不会同步清理 MinIO 对象或 Milvus Chunk。部署时应根据数据保留策略配置独立的对象和向量生命周期清理机制。
 
-## API 状态
-
-已实现：
+## API 参考
 
 - `POST /knowledge-bases`
 - `GET /knowledge-bases`
@@ -466,7 +488,7 @@ string_array
 
 ## MinerU 解析流程
 
-`MinerUApiParser` 按规划调用：
+`MinerUApiParser` 集成以下 MinerU API：
 
 - `GET /health`
 - `POST /tasks`
@@ -514,7 +536,7 @@ Markdown 和 JSON 中的 `images/...`、`./images/...` 会被重写为 MinIO HTT
 
 ## VLM 图片解释增强
 
-4.2 的可选增强可以通过环境变量启用：
+可通过以下环境变量启用 VLM 图片解释：
 
 ```bash
 VLM_IMAGE_EXPLANATIONS_ENABLED=true
