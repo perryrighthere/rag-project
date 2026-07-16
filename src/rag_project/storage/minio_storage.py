@@ -43,6 +43,8 @@ class MinioStorage:
             secret_key=config.secret_key,
             secure=secure,
         )
+        self._bucket_ready = False
+        self._bucket_lock = asyncio.Lock()
 
     @staticmethod
     def _client_endpoint(endpoint: str, secure: bool) -> tuple[str, bool]:
@@ -56,11 +58,18 @@ class MinioStorage:
         return self.config.public_endpoint or self.config.endpoint
 
     async def ensure_bucket(self) -> None:
-        def ensure() -> None:
-            if not self._client.bucket_exists(self.config.bucket):
-                self._client.make_bucket(self.config.bucket)
+        if self._bucket_ready:
+            return
+        async with self._bucket_lock:
+            if self._bucket_ready:
+                return
 
-        await asyncio.to_thread(ensure)
+            def ensure() -> None:
+                if not self._client.bucket_exists(self.config.bucket):
+                    self._client.make_bucket(self.config.bucket)
+
+            await asyncio.to_thread(ensure)
+            self._bucket_ready = True
 
     async def put_bytes(self, object_key: str, payload: bytes, content_type: str | None = None) -> StoredObject:
         await self.ensure_bucket()

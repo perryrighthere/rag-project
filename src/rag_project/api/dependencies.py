@@ -38,6 +38,7 @@ def get_parser() -> MinerUApiParser:
             "model": settings.vlm_model,
             "timeout": settings.vlm_timeout,
             "max_tokens": settings.vlm_max_tokens,
+            "concurrency": settings.vlm_concurrency,
         }
         if settings.vlm_prompt:
             config_kwargs["prompt"] = settings.vlm_prompt

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     vlm_prompt: str | None = None
     vlm_timeout: float = 120.0
     vlm_max_tokens: int = 300
+    vlm_concurrency: int = Field(default=4, ge=1)
 
     embedding_base_url: str | None = None
     embedding_api_key: str = "EMPTY"

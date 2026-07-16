@@ -171,6 +171,7 @@ async def test_parse_reports_progress_after_mineru_submit(monkeypatch) -> None:
         "mineru_submitted",
         "mineru_finished",
         "result_downloaded",
+        "persisting_artifacts",
         "artifacts_persisted",
     ]
     assert events[1][1]["parser_task_id"] == "mineru_task_1"

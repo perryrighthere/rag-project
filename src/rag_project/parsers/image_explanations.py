@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import mimetypes
 import re
@@ -34,6 +35,7 @@ class ImageExplanationConfig(BaseModel):
     prompt: str = DEFAULT_IMAGE_EXPLANATION_PROMPT
     timeout: float = 120.0
     max_tokens: int = 300
+    concurrency: int = Field(default=4, ge=1)
 
     @property
     def is_configured(self) -> bool:
@@ -78,36 +80,47 @@ class ImageExplanationGenerator:
 
         client = self._create_client()
         lines = markdown_text.splitlines()
-        explanations_by_url: dict[str, str | None] = {}
+        requests_by_url: dict[str, tuple[ImageAsset, str]] = {}
+        for line_index, line in enumerate(lines):
+            image_urls = self._line_image_urls(line)
+            if not image_urls:
+                continue
+            next_line = lines[line_index + 1].strip() if line_index + 1 < len(lines) else ""
+            if self._has_existing_explanation(next_line):
+                continue
+            prompt = self._build_vlm_prompt(self.config.prompt, self._build_markdown_context(lines, line_index))
+            for image_url in image_urls:
+                asset = image_by_url.get(image_url)
+                if asset is not None and image_url not in requests_by_url:
+                    requests_by_url[image_url] = (asset, prompt)
+
+        semaphore = asyncio.Semaphore(self.config.concurrency)
+
+        async def explain(asset: ImageAsset, prompt: str) -> str:
+            async with semaphore:
+                return await self._request_image_explanation(client, prompt=prompt, asset=asset)
+
+        urls = list(requests_by_url)
+        explanations = await asyncio.gather(
+            *(explain(*requests_by_url[image_url]) for image_url in urls)
+        )
+        explanations_by_url = dict(zip(urls, explanations, strict=True))
+
         enriched_lines: list[str] = []
         chunks: list[ImageExplanationChunk] = []
-
         for line_index, line in enumerate(lines):
             enriched_lines.append(line)
             image_urls = self._line_image_urls(line)
             if not image_urls:
                 continue
-
             next_line = lines[line_index + 1].strip() if line_index + 1 < len(lines) else ""
             if self._has_existing_explanation(next_line):
                 continue
-
-            prompt = self._build_vlm_prompt(self.config.prompt, self._build_markdown_context(lines, line_index))
             for image_url in image_urls:
                 asset = image_by_url.get(image_url)
-                if asset is None:
+                explanation = explanations_by_url.get(image_url)
+                if asset is None or not explanation:
                     continue
-                if image_url not in explanations_by_url:
-                    explanations_by_url[image_url] = await self._request_image_explanation(
-                        client,
-                        prompt=prompt,
-                        asset=asset,
-                    )
-
-                explanation = explanations_by_url[image_url]
-                if not explanation:
-                    continue
-
                 enriched_lines.append(self._format_image_explanation(explanation, language))
                 chunks.append(
                     self._build_chunk(

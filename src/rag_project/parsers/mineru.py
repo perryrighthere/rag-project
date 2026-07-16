@@ -81,6 +81,8 @@ class MinerUApiParser(DocumentParser):
             if progress_callback is not None:
                 await progress_callback("result_downloaded", {"parser_task_id": parser_task_id})
 
+        if progress_callback is not None:
+            await progress_callback("persisting_artifacts", {"parser_task_id": parser_task_id})
         artifacts = await self._persist_zip_artifacts(zip_payload, filename, options)
         if progress_callback is not None:
             await progress_callback(
@@ -181,28 +183,30 @@ class MinerUApiParser(DocumentParser):
         image_assets: list[ImageAsset] = []
         image_explanation_chunks = []
 
-        with zipfile.ZipFile(BytesIO(zip_payload)) as archive:
-            files = [(info.filename, archive.read(info)) for info in archive.infolist() if not info.is_dir()]
-
+        files = await asyncio.to_thread(self._extract_zip_files, zip_payload)
         image_members = {name: data for name, data in files if self._is_image_member(name)}
 
         def sync_image_url_for_name(image_name: str) -> str:
             object_key = build_parsed_image_key(options.kb_id, options.document_id, image_name)
             return self.storage.object_url(object_key)
 
-        for member_name, payload in sorted(image_members.items()):
+        async def persist_image(member_name: str, payload: bytes) -> tuple[str, ImageAsset]:
             image_name = self._image_name(member_name)
             object_key = build_parsed_image_key(options.kb_id, options.document_id, image_name)
             content_type = mimetypes.guess_type(image_name)[0] or "application/octet-stream"
             await self.storage.put_bytes(object_key, payload, content_type)
-            image_object_keys.append(object_key)
-            image_assets.append(
-                ImageAsset(
-                    image_url=self.storage.object_url(object_key),
-                    object_key=object_key,
-                    content=payload,
-                )
+            return object_key, ImageAsset(
+                image_url=self.storage.object_url(object_key),
+                object_key=object_key,
+                content=payload,
             )
+
+        persisted_images = await asyncio.gather(
+            *(persist_image(member_name, payload) for member_name, payload in sorted(image_members.items()))
+        )
+        for object_key, image_asset in persisted_images:
+            image_object_keys.append(object_key)
+            image_assets.append(image_asset)
 
         for member_name, payload in sorted(files):
             if self._is_ignored_member(member_name) or self._is_image_member(member_name):
@@ -248,6 +252,11 @@ class MinerUApiParser(DocumentParser):
             "image_object_keys": image_object_keys,
             "image_explanation_chunks": image_explanation_chunks,
         }
+
+    @staticmethod
+    def _extract_zip_files(zip_payload: bytes) -> list[tuple[str, bytes]]:
+        with zipfile.ZipFile(BytesIO(zip_payload)) as archive:
+            return [(info.filename, archive.read(info)) for info in archive.infolist() if not info.is_dir()]
 
     @staticmethod
     def _to_form_data(options: ParseOptions) -> dict[str, str | list[str]]:

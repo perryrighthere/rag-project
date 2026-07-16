@@ -545,6 +545,7 @@ VLM_API_KEY=your-api-key
 VLM_MODEL=your-vlm-model
 VLM_TIMEOUT=120
 VLM_MAX_TOKENS=300
+VLM_CONCURRENCY=4
 ```
 
 启用后，解析流程会在 MinerU 产物保存阶段额外执行：
@@ -573,7 +574,7 @@ VLM_MAX_TOKENS=300
 }
 ```
 
-默认不启用该能力。启用时必须同时配置 `VLM_BASE_URL` 和 `VLM_MODEL`；否则解析任务会失败并在任务 `error` 中返回配置错误。
+默认不启用该能力。启用时必须同时配置 `VLM_BASE_URL` 和 `VLM_MODEL`；否则解析任务会失败并在任务 `error` 中返回配置错误。MinerU 完成后，应用仍需下载结果、保存产物，并为图片生成解释；任务在这些步骤完成前会保持 `running`。图片解释默认通过 `VLM_CONCURRENCY=4` 并发执行，可根据 VLM 服务限流和处理能力调整。若不需要图片解释，设置 `VLM_IMAGE_EXPLANATIONS_ENABLED=false` 可显著缩短 MinerU 完成后的处理时间。
 
 ## 测试
 
