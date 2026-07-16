@@ -145,7 +145,7 @@ curl http://127.0.0.1:8000/health
 
 ## Docker Compose
 
-默认本地运行方式会启动应用、PostgreSQL、MinIO、etcd 和 Milvus standalone：
+默认本地运行方式会启动应用、PostgreSQL、MinIO、etcd、Milvus standalone 和 Attu：
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
@@ -159,6 +159,7 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
 - MinIO Console: `http://127.0.0.1:9001`
 - PostgreSQL: `127.0.0.1:5432`
 - Milvus: `127.0.0.1:19530`
+- Attu: `http://127.0.0.1:3000`（已默认连接 Compose 中的 Milvus）
 
 只运行应用并连接外部 PostgreSQL、Milvus 和 MinIO 时，只使用基础 compose 文件，并在 `.env` 中覆盖外部地址：
 
@@ -244,7 +245,17 @@ curl -s -X POST "http://127.0.0.1:8000/knowledge-bases/${KB_ID}/documents" \
   -F 'metadata={"doc_type":"policy","department":"finance","year":2025,"tags":["travel"]}'
 ```
 
-响应中会返回 `document_id`。当前实现会把上传文件内容随文档记录保存到数据库，以便后续后台解析任务读取；真正写入 MinIO 发生在解析任务启动后。大文件生产部署建议进一步调整为“上传即写 MinIO，数据库只保存 raw object key”。
+响应中会返回 `document_id`。当前实现会把上传文件内容随文档记录保存到数据库，以便后续后台解析任务读取；真正写入 MinIO 发生在解析任务启动后。大文件生产部署建议进一步调整为“上传即写 MinIO，数据库只保存 raw object key”。文档完成索引时，metadata 会同时写入每个 Milvus Chunk 的 `metadata_json` 和 schema 对应的 scalar/dynamic 字段。
+
+修改文档 metadata 使用完整替换语义：
+
+```bash
+curl -s -X PATCH "http://127.0.0.1:8000/documents/${DOCUMENT_ID}/metadata" \
+  -H 'Content-Type: application/json' \
+  -d '{"metadata":{"doc_type":"policy","department":"hr","year":2025,"tags":["benefits"]}}'
+```
+
+服务会先按知识库 metadata schema 校验。已索引文档会同步更新数据库 Chunk 和 Milvus Chunk metadata，并复用原向量，不会重复调用 Embedding API；未索引文档会在后续索引时携带最新 metadata。
 
 ### 3. 启动 MinerU 解析
 
@@ -449,6 +460,7 @@ curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 - `POST /knowledge-bases/{kb_id}/documents`
 - `GET /documents/{document_id}`
 - `GET /documents/{document_id}/chunks`
+- `PATCH /documents/{document_id}/metadata`
 - `DELETE /documents/{document_id}`
 - `POST /documents/{document_id}/parse`
 - `POST /documents/{document_id}/index`
@@ -485,6 +497,7 @@ string_array
 - 操作符必须受支持且适用于字段类型。
 - 字符串会由项目代码转义后再拼入 Milvus expr。
 - filter 深度和条件数有限制，避免复杂表达式直接穿透到 Milvus。
+- 过滤表达式直接作为 Milvus vector search 的 `filter` 执行，先在 Milvus 中过滤候选 Chunk，再进行向量相似度匹配。
 
 ## MinerU 解析流程
 

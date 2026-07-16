@@ -14,6 +14,7 @@ from rag_project.api.schemas import (
     ChatRequest,
     ChatResponse,
     DocumentChunksResponse,
+    DocumentMetadataUpdate,
     DocumentRecord,
     KnowledgeBaseCreate,
     KnowledgeBaseRecord,
@@ -125,6 +126,55 @@ async def list_document_chunks(document_id: str) -> DocumentChunksResponse:
     if _store().get_document(document_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     return DocumentChunksResponse(document_id=document_id, chunks=_store().list_document_chunks(document_id))
+
+
+@router.patch("/documents/{document_id}/metadata", response_model=DocumentRecord)
+async def update_document_metadata(document_id: str, payload: DocumentMetadataUpdate) -> DocumentRecord:
+    store = _store()
+    document = store.get_document(document_id)
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if document.status == "deleted":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deleted document metadata cannot be updated")
+
+    knowledge_base = store.get_knowledge_base(document.kb_id)
+    if knowledge_base is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge base not found")
+    try:
+        knowledge_base.metadata_schema.validate_document_metadata(payload.metadata)
+    except MetadataValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    schema_fields = set(knowledge_base.metadata_schema.field_map)
+    chunks = store.list_document_chunks(document_id)
+    updated_chunks = [
+        chunk.model_copy(
+            update={
+                "metadata": {
+                    **{key: value for key, value in chunk.metadata.items() if key not in schema_fields},
+                    **payload.metadata,
+                }
+            }
+        )
+        for chunk in chunks
+    ]
+    if updated_chunks:
+        try:
+            await get_vector_store().update_chunk_metadata(
+                updated_chunks,
+                metadata_schema=knowledge_base.metadata_schema,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Failed to synchronize metadata to Milvus: {exc}",
+            ) from exc
+        await store.replace_document_chunks(document_id, updated_chunks)
+
+    updated = await store.update_document(document_id, metadata=payload.metadata)
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    return updated
 
 
 @router.delete("/documents/{document_id}", response_model=DocumentRecord)

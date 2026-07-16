@@ -43,6 +43,9 @@ class KnowledgeBaseRecord(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class DocumentMetadataUpdate(BaseModel):
+    metadata: dict[str, Any]
+
 class DocumentRecord(BaseModel):
     document_id: str = Field(default_factory=lambda: new_id("doc"))
     kb_id: str

@@ -99,6 +99,16 @@ services:
       minio:
         condition: service_healthy
 
+  attu:
+    image: zilliz/attu:v2.5.6
+    environment:
+      MILVUS_URL: milvus:19530
+    ports:
+      - "${ATTU_PORT:-3000}:3000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   minio_data:
