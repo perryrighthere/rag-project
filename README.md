@@ -450,6 +450,39 @@ curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 
 删除接口执行逻辑删除，仅将数据库中的文档状态标记为 `deleted`，不会同步清理 MinIO 对象或 Milvus Chunk。部署时应根据数据保留策略配置独立的对象和向量生命周期清理机制。
 
+### 11. Hermes Agent 通过 MCP 接入
+
+应用启动时会在 `http://127.0.0.1:8000/mcp` 挂载一个 MCP (Model Context Protocol) server，把知识库检索、QA 问答和任务状态查询暴露为工具，供 [Hermes Agent](https://hermes-agent.nousresearch.com/) 等 MCP 客户端调用。
+
+暴露的工具：
+
+| 工具 | 说明 |
+| --- | --- |
+| `list_knowledge_bases` | 列出知识库 ID、名称和描述 |
+| `retrieval_search` | metadata 过滤的向量检索，返回带来源的 Chunk |
+| `qa_chat` | 基于知识库生成带引用的中文答案 |
+| `get_task_status` | 查询 parse/index/ingest 任务状态 |
+
+MCP 工具复用 `/retrieval/search` 和 `/chat` 的同一套实现：metadata filter 同样经过 schema 校验并强制附加 `kb_id` 隔离，不接收原始 Milvus 表达式；rerank 失败时同样降级为向量召回顺序。
+
+在 Hermes 的 `~/.hermes/config.yaml` 中把本服务注册为 MCP server：
+
+```yaml
+mcp_servers:
+  rag_project:
+    url: "http://127.0.0.1:8000/mcp"
+    headers:
+      Authorization: "Bearer <API_TOKEN>"
+```
+
+然后启动 Hermes 并调用知识库能力，例如：
+
+```text
+先用 list_knowledge_bases 找到政策知识库的 ID，再检索"报销政策是什么？"，并基于结果回答。
+```
+
+需要认证时，应先把 RAG API 及 `/mcp` 放到同一认证网关后（当前 FastAPI 未内置认证中间件），再用 `headers` 传递访问令牌。若服务部署在其他主机，将 `url` 改为可访问的地址即可。
+
 ## API 参考
 
 - `POST /knowledge-bases`
@@ -469,6 +502,7 @@ curl -s -X DELETE "http://127.0.0.1:8000/documents/${DOCUMENT_ID}"
 - `GET /tasks/{task_id}`
 - `POST /retrieval/search`
 - `POST /chat`
+- `POST /mcp`（MCP over Streamable HTTP）
 
 ## Metadata Schema 与 Filter 安全边界
 
