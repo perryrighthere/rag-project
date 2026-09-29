@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -35,10 +36,32 @@ class MilvusVectorStoreAdapter:
 
     def __init__(self, config: VectorStoreConfig, *, client: MilvusClient | None = None):
         self.config = config
-        self.client = client or MilvusClient(uri=config.uri)
+        self._client = client
 
-    async def ensure_collection(self, *, embedding_dim: int, metadata_schema: MetadataSchema) -> None:
-        await asyncio.to_thread(self._ensure_collection, embedding_dim, metadata_schema)
+    @property
+    def client(self) -> MilvusClient:
+        # Dependency construction should not fail after an API has already created a task.
+        if self._client is None:
+            self._client = MilvusClient(uri=self.config.uri)
+        return self._client
+
+    async def ensure_collection(self, *, embedding_dim: int, metadata_schema: MetadataSchema, embedding_model: str) -> None:
+        await asyncio.to_thread(self._ensure_collection, embedding_dim, metadata_schema, embedding_model)
+
+    async def validate_embedding(self, *, model: str, dim: int) -> None:
+        await asyncio.to_thread(self._validate_embedding, model, dim)
+
+    def _validate_embedding(self, model: str, dim: int) -> None:
+        description = self.client.describe_collection(collection_name=self.config.collection)
+        try:
+            signature = json.loads(description.get("description") or "{}")
+        except (ValueError, TypeError):
+            signature = {}
+        if not isinstance(signature, dict) or signature.get("embedding_model") != model or signature.get("embedding_dim") != dim:
+            raise ValueError("Milvus collection embedding model/dimension is different or unverified. Set MILVUS_COLLECTION to a new name and rebuild the index with one model.")
+        vector_field = next((field for field in description.get("fields", []) if field["name"] == self.config.vector_field), None)
+        if vector_field is None or int(vector_field.get("params", {}).get("dim", 0)) != dim:
+            raise ValueError("Milvus vector field dimension does not match the configured embedding dimension")
 
     async def upsert_chunks(
         self,
@@ -47,10 +70,13 @@ class MilvusVectorStoreAdapter:
         *,
         metadata_schema: MetadataSchema,
         embedding_dim: int,
+        embedding_model: str,
     ) -> None:
         if len(chunks) != len(vectors):
             raise ValueError("chunks and vectors must have the same length")
-        await self.ensure_collection(embedding_dim=embedding_dim, metadata_schema=metadata_schema)
+        await self.ensure_collection(embedding_dim=embedding_dim, metadata_schema=metadata_schema, embedding_model=embedding_model)
+        if any(len(vector) != embedding_dim for vector in vectors):
+            raise ValueError("Vector dimension does not match the collection")
         rows = [self._chunk_row(chunk, vector, metadata_schema) for chunk, vector in zip(chunks, vectors)]
         if rows:
             await asyncio.to_thread(self.client.upsert, collection_name=self.config.collection, data=rows)
@@ -104,11 +130,13 @@ class MilvusVectorStoreAdapter:
         )
         return [self._search_hit_to_match(hit) for hit in (results[0] if results else [])]
 
-    def _ensure_collection(self, embedding_dim: int, metadata_schema: MetadataSchema) -> None:
+    def _ensure_collection(self, embedding_dim: int, metadata_schema: MetadataSchema, embedding_model: str) -> None:
         if self.client.has_collection(self.config.collection):
+            self._validate_embedding(embedding_model, embedding_dim)
             return
 
-        schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
+        schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True,
+            description=json.dumps({"embedding_model": embedding_model, "embedding_dim": embedding_dim}))
         schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=128)
         schema.add_field("kb_id", DataType.VARCHAR, max_length=128)
         schema.add_field("document_id", DataType.VARCHAR, max_length=128)

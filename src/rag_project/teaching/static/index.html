@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RAG 课堂实验室</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css?v=4">
+  <script src="app.js?v=6" defer></script>
+</head>
+<body>
+  <header><div class="brand"><span class="mark">R</span><div><strong>RAG 课堂实验室</strong><small>从一段原文，到一个有依据的答案</small></div></div><span class="badge">原生 Web · 实验自动记录</span></header>
+  <main>
+    <section class="intro"><div><p class="eyebrow">LEARN BY OBSERVING</p><h1>看见检索，理解回答。</h1><p>先探索固定资料，再运行真实检索。每次只改变一个参数，观察证据与答案的变化。</p></div><div class="steps">01 资料与切分 <span>→</span> 02 检索与问答 <span>→</span> 03 实验报告</div></section>
+    <nav aria-label="实验步骤"><button data-tab="manage" aria-pressed="false">知识库管理</button><button data-tab="corpus" aria-pressed="true">01　资料与切分</button><button data-tab="uploads" aria-pressed="false">上传与入库</button><button data-tab="experiment" aria-pressed="false">02　检索与问答</button><button data-tab="reports" aria-pressed="false">03　实验报告</button></nav>
+    <p id="notice" role="status" aria-live="polite">正在加载教学资料…</p>
+    <section id="corpus" class="panel">
+      <aside class="card"><p class="eyebrow">固定教学数据 / v1.0.0</p><h2>青禾学院制度集</h2><p class="muted">5 份虚构制度，7 个实验问题。新旧版本、部门差异与无答案场景。</p><label for="fixture">选择文档</label><select id="fixture"></select><label for="chunk-size">Chunk 长度（字符）</label><input id="chunk-size" type="number" min="100" max="8000" value="800"><label for="overlap">重叠长度（字符）</label><input id="overlap" type="number" min="0" max="2000" value="120"><button id="preview" class="secondary">预览切分</button><hr><button id="import">创建教学知识库副本</button><p class="hint">预览与导入只需数据库。导入的是预解析 Markdown，不调用 MinerU 或 MinIO；每次创建独立副本。</p></aside>
+      <article class="card"><div class="section-title"><h2>原始 Markdown</h2><span id="doc-meta" class="badge"></span></div><pre id="source"></pre></article>
+      <article class="card"><div class="section-title"><h2>切分预览</h2><span id="chunk-count" class="badge">—</span></div><p class="hint">标题会拼回正文，参与向量化；字符数可能超过切分长度。预览不会创建向量。</p><div id="chunks"></div></article>
+    </section>
+    <section id="manage" class="upload-panel" hidden>
+      <aside class="card"><div class="section-title"><h2>知识库</h2><button id="manage-refresh" class="secondary compact">刷新</button></div>
+        <label for="manage-kb">选择知识库</label><select id="manage-kb"></select>
+        <button id="manage-create" class="secondary">新建知识库</button><p id="kb-count" class="hint"></p>
+        <div id="kb-editor" hidden><hr><label for="kb-name">名称</label><input id="kb-name" maxlength="255">
+          <label for="kb-description">说明</label><textarea id="kb-description" rows="3"></textarea><button id="kb-save">保存名称与说明</button>
+          <pre id="kb-details"></pre><details><summary>元数据字段与切分配置</summary><pre id="kb-config"></pre></details>
+          <hr><button id="kb-delete" class="danger">删除知识库</button><p class="hint">删除知识库及库内文档、片段和任务记录，停止检索。历史报告保留。原始文件与向量残留暂不物理清理。存在运行中任务时不可删除。</p>
+        </div>
+      </aside>
+      <article class="card"><div class="section-title"><h2>库内文档</h2><button id="manage-upload" class="secondary compact">上传与处理文档</button></div>
+        <p id="kb-summary" class="muted">请选择知识库。</p><label for="document-search">搜索文档名称</label><input id="document-search" type="search" placeholder="输入文件名">
+        <label class="check"><input id="show-deleted" type="checkbox">显示已删除文档</label><div id="manage-documents"></div>
+      </article>
+    </section>
+    <section id="uploads" class="upload-panel" hidden>
+      <aside class="card">
+        <h2>上传自己的资料</h2>
+        <label for="upload-kb">目标知识库</label><select id="upload-kb"></select>
+        <details><summary>新建空白知识库</summary>
+          <label for="new-kb-name">知识库名称</label><input id="new-kb-name" maxlength="255" placeholder="例如：本班课程资料">
+          <label for="new-kb-schema">Metadata schema（JSON，可保留空字段）</label><textarea id="new-kb-schema" rows="4">{"fields": []}</textarea>
+          <p class="hint">字段示例：{"fields":[{"name":"year","type":"int","required":true,"filterable":true}]}。未声明字段的知识库无需填写 metadata；默认切分长度800、重叠120。</p>
+          <button id="create-kb" class="secondary">创建空白知识库</button>
+        </details>
+        <label for="upload-files">选择文件（可多选）</label><input id="upload-files" type="file" multiple>
+        <p class="hint">PDF、图片等可解析格式取决于所连接的 MinerU 服务。下方 metadata 应用于本批全部文件。</p>
+        <div id="upload-metadata"></div>
+        <label for="upload-mode">上传后操作</label><select id="upload-mode"><option value="ingest">上传并完整入库（解析 → 索引）</option><option value="upload">仅上传，稍后处理</option></select>
+        <button id="upload-submit">上传文件</button>
+        <p class="hint">仅上传只需数据库。解析需要 MinerU 和 MinIO；索引还需要 Embedding API 和 Milvus。无需 Chat 服务。</p>
+      </aside>
+      <div class="results">
+        <article class="card"><div class="section-title"><h2>文档与任务</h2><button id="upload-refresh" class="secondary compact">刷新文档与任务</button></div>
+          <p class="hint">支持解析、索引和失败重试。刷新页面后可继续查询任务；重新运行失败任务会从该操作起点开始，不是断点续跑。</p>
+          <p id="upload-progress" role="status" aria-live="polite">选择知识库后查看文档。</p><div id="upload-documents"></div>
+        </article>
+        <article class="card"><h2 id="uploaded-title">解析结果与索引片段</h2><p class="hint">在上方文档列表点击“查看内容”，核验解析后的 Markdown 和当前索引片段。</p><details open><summary>解析后的 Markdown</summary><pre id="uploaded-markdown">尚未选择文档。</pre></details><details><summary>当前索引片段</summary><div id="uploaded-chunks"></div></details></article>
+        <button id="go-experiment" class="secondary">前往检索与问答</button>
+      </div>
+    </section>
+    <section id="experiment" class="panel" hidden>
+      <aside class="card"><h2>实验设置</h2><label for="kb">知识库</label><select id="kb"></select><button id="refresh" class="text-button">刷新文档状态</button><div id="documents"></div><button id="index" class="secondary">索引 / 重建全部有效文档</button><p class="hint">需要 Embedding API 与 Milvus。切分参数取自创建副本时的配置；参数对比请创建新副本。</p><hr><label for="question">选择实验问题</label><select id="question"></select><label for="query">问题</label><textarea id="query" rows="3"></textarea><label for="filters">Metadata 过滤（JSON）</label><textarea id="filters" rows="3">{}</textarea><div class="fields"><div><label for="top-k">召回 top_k</label><input id="top-k" type="number" min="1" max="100" value="8"></div><div><label for="top-n">保留 top_n</label><input id="top-n" type="number" min="1" max="100" value="4"></div></div><label class="check"><input id="rerank" type="checkbox" checked>启用重排序</label><p class="hint">未配置重排服务时保留原序；调用失败时自动降级并记录原因。</p><label for="mode">实验模式</label><select id="mode"><option value="search">仅检索（不调用 Chat）</option><option value="chat">检索 + 生成答案</option></select><label for="orchestrator">答案生成方式</label><select id="orchestrator"><option value="single">单次模型生成</option><option value="langgraph_multi">四角色顺序协作</option></select><button id="run">运行并保存报告</button></aside>
+      <div class="results"><article class="card"><div class="section-title"><h2>本次实验</h2><span id="result-status" class="badge">等待运行</span></div><p id="learning" class="muted"></p><details><summary>参考答案（不会发送给模型）</summary><p id="reference"></p></details><div id="report-links" class="links"></div><pre id="filter-expr">运行后显示实际过滤表达式。</pre><p class="hint">向量分数与重排分数不是同一种量，不能直接比较。</p></article><div class="comparison"><article class="card"><h2>初始召回</h2><div id="candidates" class="empty">候选片段将在这里显示。</div></article><article class="card"><h2>最终片段</h2><div id="matches" class="empty">查看排序、来源与完整片段。</div></article></div><article class="card"><h2>答案与运行记录</h2><pre id="answer">仅检索模式不生成答案。</pre><details><summary>查看实际上下文</summary><pre id="context"></pre></details><details><summary>查看模型提示词 / Agent 过程</summary><pre id="trace"></pre></details><details><summary>查看参数与耗时</summary><pre id="parameters"></pre></details></article></div>
+    </section>
+    <section id="reports" hidden><article class="card"><div class="section-title"><div><h2>实验记录</h2><p class="muted">自动保存在服务端数据库；页面刷新后仍可查看。保留最近 100 条列表，报告可按编号访问。</p></div><button id="reload-reports" class="secondary compact">刷新列表</button></div><div id="history" class="history"></div></article></section>
+    <footer>教学资料均为虚构 · 参考答案用于人工核验 · 真实模型的输出可能变化</footer>
+  </main>
+</body>
+</html>

@@ -23,6 +23,8 @@ class IngestionState(TypedDict, total=False):
     parsed_document: ParsedDocument | None
     chunks: list[ChunkRecord]
     vectors: list[list[float]]
+    embedding_model: str
+    embedding_dim: int
     error: str | None
     failed_node: str | None
 
@@ -111,6 +113,12 @@ class IngestionGraph:
             parse_method=settings.mineru_parse_method,
             lang_list=settings.mineru_lang_list,
         )
+
+        async def record_progress(stage: str, details: dict) -> None:
+            await self._record_progress(state, stage, **details)
+            if details.get("raw_object_key"):
+                await self.store.update_document(document.document_id, raw_object_key=details["raw_object_key"])
+
         parsed = await self.parser.parse(
             UploadedFile(
                 filename=document.filename,
@@ -118,6 +126,7 @@ class IngestionGraph:
                 content_type=document.content_type,
             ),
             options,
+            progress_callback=record_progress,
         )
         await self.store.update_document(
             document.document_id,
@@ -125,6 +134,7 @@ class IngestionGraph:
             parsed_document=parsed,
             error=None,
         )
+        await self._record_progress(state, "artifacts_persisted", parse_succeeded=True)
         return {
             "raw_file_uri": _source_uri(parsed.raw_object_key),
             "parse_options": options.model_dump(mode="json"),
@@ -165,13 +175,17 @@ class IngestionGraph:
             kb_id=document.kb_id,
             document_id=document.document_id,
             document_metadata=state.get("user_metadata") or {},
-            source_uri=_source_uri(parsed.markdown_object_key),
+            source_uri=parsed.source_uri or _source_uri(parsed.markdown_object_key),
         )
         return {"chunks": chunks}
 
     async def _embed_chunks(self, state: IngestionState) -> dict[str, Any]:
         await self.store.update_document(state["document_id"], status="embedding")
         embedding_client = self.embedding_client_factory()
+        await self.store.bind_embedding(state["kb_id"], embedding_client.config.model, embedding_client.config.dim)
+        knowledge_base = self.store.get_knowledge_base(state["kb_id"])
+        await self.vector_store.ensure_collection(embedding_dim=embedding_client.config.dim,
+            embedding_model=embedding_client.config.model, metadata_schema=knowledge_base.metadata_schema)
         chunks = [
             chunk.model_copy(
                 update={
@@ -182,7 +196,8 @@ class IngestionGraph:
             for chunk in state.get("chunks", [])
         ]
         vectors = await embedding_client.embed_documents([chunk.text for chunk in chunks])
-        return {"chunks": chunks, "vectors": vectors}
+        return {"chunks": chunks, "vectors": vectors, "embedding_model": embedding_client.config.model,
+                "embedding_dim": embedding_client.config.dim}
 
     async def _upsert_milvus(self, state: IngestionState) -> dict[str, Any]:
         document = self.store.get_document(state["document_id"])
@@ -191,7 +206,6 @@ class IngestionGraph:
             raise KeyError(f"Document not found: {state['document_id']}")
         if knowledge_base is None:
             raise KeyError(f"Knowledge base not found: {state['kb_id']}")
-        embedding_client = self.embedding_client_factory()
         chunks = state.get("chunks", [])
         vectors = state.get("vectors", [])
         await self.vector_store.delete_document_chunks(kb_id=document.kb_id, document_id=document.document_id)
@@ -199,14 +213,10 @@ class IngestionGraph:
             chunks,
             vectors,
             metadata_schema=knowledge_base.metadata_schema,
-            embedding_dim=embedding_client.config.dim,
+            embedding_dim=state["embedding_dim"],
+            embedding_model=state["embedding_model"],
         )
         await self.store.replace_document_chunks(document.document_id, chunks)
-        await self.store.update_knowledge_base(
-            document.kb_id,
-            embedding_model=embedding_client.config.model,
-            embedding_dim=embedding_client.config.dim,
-        )
         return {}
 
     async def _verify_index(self, state: IngestionState) -> dict[str, Any]:
@@ -220,34 +230,42 @@ class IngestionGraph:
         document = self.store.get_document(state["document_id"])
         if document is None:
             raise KeyError(f"Document not found: {state['document_id']}")
-        embedding_client = self.embedding_client_factory()
         chunks = self.store.list_document_chunks(document.document_id)
         await self.store.update_document(
             document.document_id,
             status="indexed",
             chunk_count=len(chunks),
-            embedding_model=embedding_client.config.model,
-            embedding_dim=embedding_client.config.dim,
+            embedding_model=state["embedding_model"],
+            embedding_dim=state["embedding_dim"],
             error=None,
         )
         await self.store.update_task(
             state["task_id"],
             status="succeeded",
-            result={"chunk_count": len(chunks), "embedding_model": embedding_client.config.model},
+            result={**(self.store.get_task(state["task_id"]).result or {}), "stage": "indexed",
+                    "chunk_count": len(chunks), "embedding_model": state["embedding_model"]},
         )
         return {}
 
     async def _mark_failed(self, state: IngestionState) -> dict[str, Any]:
         error = state.get("error") or "ingestion failed"
         await self.store.update_document(state["document_id"], status="failed", error=error)
+        task = self.store.get_task(state["task_id"])
+        await self._record_progress(state, "failed", failed_node=state.get("failed_node"),
+                                    failed_stage=(task.result or {}).get("stage"))
         await self.store.update_task(state["task_id"], status="failed", error=error)
         return {}
+
+    async def _record_progress(self, state: IngestionState, stage: str, **details) -> None:
+        task = self.store.get_task(state["task_id"])
+        await self.store.update_task(state["task_id"], result={**(task.result or {}), "stage": stage, **details})
 
     def _guard(self, name: str, handler):
         async def guarded(state: IngestionState) -> dict[str, Any]:
             if state.get("error"):
                 return {}
             try:
+                await self._record_progress(state, name, current_node=name)
                 return await handler(state)
             except Exception as exc:
                 return {"error": str(exc), "failed_node": name}

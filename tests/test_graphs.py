@@ -21,7 +21,7 @@ async def test_qa_graph_runs_minimal_flow() -> None:
         def build_filter_expr(self, *, kb_id, filters):
             return f'kb_id == "{kb_id}"'
 
-        async def retrieve_candidates(self, *, query, filter_expr, top_k):
+        async def retrieve_candidates(self, *, kb_id, query, filter_expr, top_k):
             return [
                 Document(
                     page_content="报销需要审批。",
@@ -61,7 +61,7 @@ async def test_qa_graph_runs_langgraph_multi_with_trace() -> None:
         def build_filter_expr(self, *, kb_id, filters):
             return f'kb_id == "{kb_id}"'
 
-        async def retrieve_candidates(self, *, query, filter_expr, top_k):
+        async def retrieve_candidates(self, *, kb_id, query, filter_expr, top_k):
             return [
                 Document(
                     page_content="报销需要审批。",
@@ -115,7 +115,7 @@ async def test_qa_graph_omits_agent_trace_by_default_for_langgraph_multi() -> No
         def build_filter_expr(self, *, kb_id, filters):
             return f'kb_id == "{kb_id}"'
 
-        async def retrieve_candidates(self, *, query, filter_expr, top_k):
+        async def retrieve_candidates(self, *, kb_id, query, filter_expr, top_k):
             return [Document(page_content="上下文", metadata={"chunk_id": "chunk_1"})]
 
         async def rerank_documents(self, *, query, documents, top_n):
@@ -207,9 +207,10 @@ async def test_mark_interrupted_tasks_failed_marks_stale_background_tasks() -> N
 
 
 @pytest.mark.asyncio
-async def test_ingestion_graph_indexes_document_with_in_memory_store() -> None:
+@pytest.mark.parametrize("reject_collection", [False, True])
+async def test_ingestion_graph_indexes_document_with_in_memory_store(reject_collection) -> None:
     class FakeParser:
-        async def parse(self, file, options):
+        async def parse(self, file, options, progress_callback=None):
             return ParsedDocument(
                 document_id=options.document_id,
                 parser="mineru",
@@ -231,10 +232,15 @@ async def test_ingestion_graph_indexes_document_with_in_memory_store() -> None:
         def __init__(self) -> None:
             self.upsert_count = 0
 
+        async def ensure_collection(self, **kwargs):
+            if reject_collection:
+                raise ValueError("Milvus collection embedding model/dimension is different or unverified")
+            return None
+
         async def delete_document_chunks(self, *, kb_id, document_id):
             return None
 
-        async def upsert_chunks(self, chunks, vectors, *, metadata_schema, embedding_dim):
+        async def upsert_chunks(self, chunks, vectors, *, metadata_schema, embedding_dim, embedding_model):
             self.upsert_count = len(chunks)
 
     store = InMemoryStore()
@@ -258,6 +264,15 @@ async def test_ingestion_graph_indexes_document_with_in_memory_store() -> None:
         vector_store=vector_store,
     ).run(task_id="task", document_id="doc")
 
+    if reject_collection:
+        task = store.tasks["task"]
+        assert task.status == "failed"
+        assert task.result["parse_succeeded"] is True
+        assert task.result["failed_node"] == "embed_chunks"
+        assert task.result["failed_stage"] == "embed_chunks"
+        assert store.documents["doc"].parsed_document.markdown_text == "# 标题\n\n正文"
+        assert vector_store.upsert_count == 0
+        return
     assert state.get("error") is None
     assert store.documents["doc"].status == "indexed"
     assert store.tasks["task"].status == "succeeded"

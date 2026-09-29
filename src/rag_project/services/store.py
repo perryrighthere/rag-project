@@ -5,6 +5,15 @@ from rag_project.chunking import ChunkRecord
 
 
 class Store(Protocol):
+    async def delete_knowledge_base(self, kb_id: str) -> bool:
+        ...
+
+    def list_documents(self, kb_id: str) -> list[DocumentRecord]:
+        ...
+
+    async def bind_embedding(self, kb_id: str, model: str, dim: int) -> None:
+        ...
+
     @property
     def knowledge_bases(self) -> dict[str, KnowledgeBaseRecord]:
         ...

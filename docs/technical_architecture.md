@@ -1,5 +1,11 @@
 # RAG 项目技术架构文档
 
+> 实现更新（2026-09）：新增 `/workbench/` 原生网页、固定校园制度教学集、`/teaching/*` 实验接口及 `experiment_reports` 报告表。固定数据直接导入预解析 Markdown，不调用 MinerU/MinIO。检索以数据库中 `indexed` 文档为准，排除逻辑删除，并校验知识库及 collection 的 Embedding 模型与维度。旧 collection 需换名重建；详见 `docs/classroom_workbench.md`。以下主体仍含早期规划，不代表 checkpoint、迁移、引用校验等已经实现。
+
+> 工作台也支持自定义文件上传：复用现有上传、parse/index/ingest 接口，按 schema 生成 metadata 输入字段，通过 `/knowledge-bases/{kb_id}/tasks` 查询阶段和错误。Ingestion Graph 将当前节点、MinerU 进度及失败节点写入任务结果；任务依旧使用进程内 BackgroundTasks。
+
+> 知识库管理：工作台提供文档列表、名称/说明编辑及删除。删除通过数据库事务级联清理文档、片段和任务，活动任务期间拒绝删除；历史报告独立保存。原始对象和向量残留不在此操作中物理删除。
+
 ## 1. 背景与目标
 
 本项目是一个面向复杂文档的 RAG 系统。核心能力包括：

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
+from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,6 +43,7 @@ class ImageExplanationChunk(BaseModel):
 
 
 class ParsedDocument(BaseModel):
+    source_uri: str | None = None
     document_id: str
     parser: str
     parser_task_id: str
@@ -57,5 +59,6 @@ class ParsedDocument(BaseModel):
 
 
 class DocumentParser(Protocol):
-    async def parse(self, file: UploadedFile, options: ParseOptions) -> ParsedDocument:
+    async def parse(self, file: UploadedFile, options: ParseOptions,
+                    progress_callback: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None) -> ParsedDocument:
         ...

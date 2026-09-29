@@ -14,6 +14,14 @@ class Base(DeclarativeBase):
     pass
 
 
+class ExperimentReportModel(Base):
+    __tablename__ = "experiment_reports"
+
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
 class KnowledgeBaseModel(Base):
     __tablename__ = "knowledge_bases"
 

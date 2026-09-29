@@ -6,7 +6,7 @@ from rag_project.chunking import ChunkRecord
 
 
 class InMemoryStore:
-    """Development store until the SQLAlchemy repositories from 4.4 are added."""
+    """Test fake implementing the production store contract."""
 
     def __init__(self) -> None:
         self.knowledge_bases: dict[str, KnowledgeBaseRecord] = {}
@@ -14,6 +14,29 @@ class InMemoryStore:
         self.chunks: dict[str, ChunkRecord] = {}
         self.tasks: dict[str, TaskRecord] = {}
         self._lock = asyncio.Lock()
+
+    def list_documents(self, kb_id: str) -> list[DocumentRecord]:
+        return [record for record in self.documents.values() if record.kb_id == kb_id]
+
+    async def delete_knowledge_base(self, kb_id: str) -> bool:
+        async with self._lock:
+            if kb_id not in self.knowledge_bases:
+                return False
+            ids = {doc.document_id for doc in self.list_documents(kb_id)}
+            if any(task.document_id in ids and task.status in {"pending", "running"} for task in self.tasks.values()):
+                raise ValueError("知识库中有正在执行的任务，请等待任务结束后再删除。")
+            self.tasks = {key: task for key, task in self.tasks.items() if task.document_id not in ids}
+            self.chunks = {key: chunk for key, chunk in self.chunks.items() if chunk.kb_id != kb_id}
+            self.documents = {key: doc for key, doc in self.documents.items() if doc.kb_id != kb_id}
+            del self.knowledge_bases[kb_id]
+            return True
+
+    async def bind_embedding(self, kb_id: str, model: str, dim: int) -> None:
+        async with self._lock:
+            record = self.knowledge_bases[kb_id]
+            if (record.embedding_model, record.embedding_dim) not in {(None, None), (model, dim)}:
+                raise ValueError("Embedding model/dimension mismatch. Use the original model or a new knowledge base and collection.")
+            self.knowledge_bases[kb_id] = record.model_copy(update={"embedding_model": model, "embedding_dim": dim})
 
     async def add_knowledge_base(self, record: KnowledgeBaseRecord) -> KnowledgeBaseRecord:
         async with self._lock:
@@ -43,6 +66,8 @@ class InMemoryStore:
 
     async def add_document(self, record: DocumentRecord) -> DocumentRecord:
         async with self._lock:
+            if record.kb_id not in self.knowledge_bases:
+                raise ValueError("Knowledge base not found")
             self.documents[record.document_id] = record
             return record
 
@@ -51,6 +76,8 @@ class InMemoryStore:
             record = self.documents.get(document_id)
             if record is None:
                 return None
+            if record.status == "deleted":
+                return record
             updated = record.model_copy(update={**changes, "updated_at": datetime.now(timezone.utc)})
             self.documents[document_id] = updated
             return updated
@@ -73,6 +100,8 @@ class InMemoryStore:
 
     async def add_task(self, record: TaskRecord) -> TaskRecord:
         async with self._lock:
+            if record.document_id and record.document_id not in self.documents:
+                raise ValueError("Knowledge base or document not found")
             self.tasks[record.task_id] = record
             return record
 

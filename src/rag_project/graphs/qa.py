@@ -129,6 +129,7 @@ class QAGraph:
 
     async def _retrieve(self, state: QAState) -> dict[str, Any]:
         candidates = await self.retriever.retrieve_candidates(
+            kb_id=state["kb_id"],
             query=state["query"],
             filter_expr=state["filter_expr"],
             top_k=int(state["top_k"]),

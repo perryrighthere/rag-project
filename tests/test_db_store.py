@@ -100,3 +100,20 @@ async def test_sqlalchemy_store_persists_knowledge_base_document_chunks_and_task
 
     assert updated_task is not None
     assert db_store.tasks["task"].result == {"chunk_count": 2}
+
+
+@pytest.mark.asyncio
+async def test_embedding_binding_is_immutable_and_deleted_document_cannot_be_revived(db_store):
+    await db_store.add_knowledge_base(KnowledgeBaseRecord(kb_id="kb", name="test"))
+    await db_store.bind_embedding("kb", "model-a", 2)
+    await db_store.bind_embedding("kb", "model-a", 2)
+    with pytest.raises(ValueError, match="mismatch"):
+        await db_store.bind_embedding("kb", "model-b", 2)
+    with pytest.raises(ValueError, match="mismatch"):
+        await db_store.bind_embedding("kb", "model-a", 3)
+    assert db_store.get_knowledge_base("kb").embedding_model == "model-a"
+    await db_store.add_document(DocumentRecord(document_id="doc", kb_id="kb", filename="a.md"))
+    await db_store.update_document("doc", status="deleted")
+    await db_store.update_document("doc", status="indexed", chunk_count=100)
+    assert db_store.get_document("doc").status == "deleted"
+    assert db_store.get_document("doc").chunk_count == 0

@@ -32,7 +32,7 @@ class OpenAICompatibleChatClient:
         )
 
     async def generate_answer(self, *, query: str, documents: list[Document]) -> str:
-        prompt = _build_prompt(query, documents)
+        prompt = build_answer_prompt(query, documents)
         return await self.generate_text(prompt)
 
     async def generate_text(self, prompt: str) -> str:
@@ -40,7 +40,7 @@ class OpenAICompatibleChatClient:
         return _normalize_content(response.content)
 
 
-def _build_prompt(query: str, documents: list[Document]) -> str:
+def build_answer_prompt(query: str, documents: list[Document]) -> str:
     context = "\n\n".join(_format_context_item(index, document) for index, document in enumerate(documents, start=1))
     return (
         "你是一个严谨的 RAG 问答助手。请只根据给定上下文回答问题。"

@@ -1,7 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 from langchain_core.documents import Document
 
-from rag_project.api.schemas import KnowledgeBaseRecord
+from rag_project.api.schemas import DocumentRecord, KnowledgeBaseRecord
 from rag_project.knowledge_base import MetadataSchema
 from rag_project.rerankers import OpenAICompatibleReranker
 from rag_project.retrieval import KnowledgeBaseRetriever
@@ -50,12 +52,17 @@ async def test_retriever_degrades_to_vector_order_when_rerank_fails() -> None:
 @pytest.mark.asyncio
 async def test_retrieval_service_builds_filter_searches_and_reranks() -> None:
     class FakeEmbeddingClient:
+        config = SimpleNamespace(model="embed", dim=2)
+
         async def embed_query(self, query):
             return [0.1, 0.2]
 
     class FakeVectorStore:
         def __init__(self) -> None:
             self.filter_expr = None
+
+        async def validate_embedding(self, **kwargs):
+            return None
 
         async def search(self, *, query_vector, filter_expr, top_k):
             self.filter_expr = filter_expr
@@ -99,6 +106,8 @@ async def test_retrieval_service_builds_filter_searches_and_reranks() -> None:
     store = InMemoryStore()
     schema = MetadataSchema(fields=[{"name": "doc_type", "type": "string", "filterable": True}])
     await store.add_knowledge_base(KnowledgeBaseRecord(kb_id="kb", name="policy", metadata_schema=schema))
+    await store.bind_embedding("kb", "embed", 2)
+    await store.add_document(DocumentRecord(document_id="doc", kb_id="kb", filename="demo.md", status="indexed"))
     vector_store = FakeVectorStore()
     retriever = KnowledgeBaseRetriever(
         store=store,
@@ -115,7 +124,7 @@ async def test_retrieval_service_builds_filter_searches_and_reranks() -> None:
         top_n=1,
     )
 
-    assert vector_store.filter_expr == 'kb_id == "kb" and ((doc_type == "policy"))'
+    assert vector_store.filter_expr == 'kb_id == "kb" and ((doc_type == "policy")) and document_id in ["doc"]'
     assert [match.chunk_id for match in result.matches] == ["chunk_2"]
     assert result.matches[0].rerank_score == 0.95
     assert result.matches[0].metadata == {"doc_type": "policy"}

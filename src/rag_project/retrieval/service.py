@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 from typing import Any, Callable
 
 from langchain_core.documents import Document
@@ -61,11 +62,14 @@ class KnowledgeBaseRetriever:
         return knowledge_base.metadata_schema
 
     def build_filter_expr(self, *, kb_id: str, filters: dict[str, Any]) -> str:
-        return self.filter_builder.build(
+        expression = self.filter_builder.build(
             kb_id=kb_id,
             metadata_schema=self.metadata_schema_for(kb_id),
             filters=filters,
         )
+        active_ids = [record.document_id for record in self.store.list_documents(kb_id) if record.status == "indexed"]
+        # Database state is authoritative, including logical deletion and failed reindexing.
+        return f"{expression} and document_id in {json.dumps(active_ids, ensure_ascii=False)}" if active_ids else f'{expression} and document_id == ""'
 
     async def retrieve_candidates(
         self,
@@ -73,14 +77,26 @@ class KnowledgeBaseRetriever:
         query: str,
         filter_expr: str,
         top_k: int,
+        kb_id: str,
     ) -> list[Document]:
-        query_vector = await self.embedding_client_factory().embed_query(query)
+        knowledge_base = self.store.get_knowledge_base(kb_id)
+        if knowledge_base is None:
+            raise KeyError(kb_id)
+        if not any(record.status == "indexed" for record in self.store.list_documents(kb_id)):
+            return []
+        client = self.embedding_client_factory()
+        if (knowledge_base.embedding_model, knowledge_base.embedding_dim) != (client.config.model, client.config.dim):
+            raise ValueError("Embedding model/dimension mismatch. Restore the knowledge base's original model before querying.")
+        await self.vector_store.validate_embedding(model=client.config.model, dim=client.config.dim)
+        query_vector = await client.embed_query(query)
         matches = await self.vector_store.search(
             query_vector=query_vector,
             filter_expr=filter_expr,
             top_k=top_k,
         )
-        return [_search_match_to_document(match) for match in matches]
+        # Recheck after network I/O so a document deleted during search is excluded too.
+        active_ids = {record.document_id for record in self.store.list_documents(kb_id) if record.status == "indexed"}
+        return [_search_match_to_document(match) for match in matches if match.document_id in active_ids]
 
     async def rerank_documents(
         self,
@@ -105,7 +121,7 @@ class KnowledgeBaseRetriever:
     ) -> RetrievalResult:
         limit = min(top_n or top_k, top_k)
         filter_expr = self.build_filter_expr(kb_id=kb_id, filters=filters)
-        candidates = await self.retrieve_candidates(query=query, filter_expr=filter_expr, top_k=top_k)
+        candidates = await self.retrieve_candidates(query=query, filter_expr=filter_expr, top_k=top_k, kb_id=kb_id)
         reranked, rerank_error = await self.rerank_documents(query=query, documents=candidates, top_n=limit)
         return RetrievalResult(
             query=query,

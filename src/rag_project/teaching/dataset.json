@@ -1,0 +1,48 @@
+{
+  "id": "campus-policies",
+  "version": "1.0.0",
+  "title": "青禾学院 · 校园制度实验集",
+  "description": "全部机构、金额和制度均为虚构，仅供教学。包含版本冲突、部门差异、表格、跨文档问题和无答案问题。参考答案不进入检索索引。",
+  "metadata_schema": {"fields": [
+    {"name": "department", "type": "string", "required": true, "filterable": true},
+    {"name": "year", "type": "int", "required": true, "filterable": true},
+    {"name": "doc_type", "type": "string", "required": true, "filterable": true},
+    {"name": "edition", "type": "string", "required": true, "filterable": true}
+  ]},
+  "documents": [
+    {
+      "id": "travel-2024", "filename": "01_差旅办法_2024.md",
+      "metadata": {"department": "财务处", "year": 2024, "doc_type": "差旅", "edition": "旧版"},
+      "markdown": "# 青禾学院差旅报销办法（2024版）\n\n本文件为教学用虚构制度，适用于2024年出差事项。\n\n## 住宿与交通标准\n\n第1页\n\n普通教职工住宿报销上限为每人每晚350元。城市间高铁限报二等座，出租车需说明用途并提交发票。超出住宿上限的部分由个人承担。\n\n## 报销时限\n\n第2页\n\n出差结束后30个自然日内提交报销申请。材料包括出差审批单、交通发票、住宿发票和行程说明。财务处在材料齐全后10个工作日内完成审核。\n"
+    },
+    {
+      "id": "travel-2025", "filename": "02_差旅办法_2025.md",
+      "metadata": {"department": "财务处", "year": 2025, "doc_type": "差旅", "edition": "现行"},
+      "markdown": "# 青禾学院差旅报销办法（2025版）\n\n本文件为教学用虚构制度，自2025年1月1日起实施，替代2024版。2025年及之后的出差事项按本版执行。\n\n## 住宿标准\n\n第1页\n\n| 人员类别 | 每人每晚住宿上限 |\n| --- | --- |\n| 普通教职工 | 450元 |\n| 随队学生 | 280元 |\n\n住宿费用按发票实际金额报销，不得超过对应上限；实际支出低于上限时，不补足差额。普通教职工出差两晚，每晚发票金额分别为420元、480元，可报住宿费用合计870元。\n\n## 交通与审批\n\n第2页\n\n城市间高铁限报二等座。出差前必须获得所在部门负责人的批准。飞机经济舱须事前另行审批。未完成出差审批的费用暂不受理。\n\n## 材料与时限\n\n第3页\n\n出差结束后15个自然日内提交申请，包含出差审批单、交通发票、住宿发票和行程说明。财务处在材料齐全后7个工作日内完成审核。超过时限需补交书面说明，经部门负责人签字后受理。补交说明不意味着可以免除发票要求。\n"
+    },
+    {
+      "id": "research-travel", "filename": "03_科研项目差旅补充规定.md",
+      "metadata": {"department": "科研处", "year": 2025, "doc_type": "差旅", "edition": "现行"},
+      "markdown": "# 科研项目差旅补充规定\n\n本文件为教学用虚构制度，适用于青禾学院科研项目经费。\n\n## 审批要求\n\n第1页\n\n使用科研项目经费出差，除所在部门负责人批准外，还必须取得项目负责人的批准。跨省出差应在出发前5个工作日提交申请。科研处批准项目用途，不替代财务处的票据审核。\n\n## 费用与预算\n\n第2页\n\n科研项目差旅的住宿、交通标准参照财务处2025版差旅报销办法，不另设更高住宿标准。单次差旅预算超过5000元时，还须由科研处审核预算。项目剩余额度不足时，应先完成预算调整再申请出差。\n"
+    },
+    {
+      "id": "student-activity", "filename": "04_学生活动报销指南.md",
+      "metadata": {"department": "学生处", "year": 2025, "doc_type": "活动", "edition": "现行"},
+      "markdown": "# 学生活动报销指南\n\n本文件为教学用虚构制度，适用于校内学生社团活动。\n\n## 活动物资\n\n第1页\n\n活动物资预算上限为每场800元。活动前需提交预算清单，由指导教师批准。报销时提交发票、采购明细和活动签到表。奖金、礼金和个人餐费不在报销范围内。\n\n## 提交时间\n\n第2页\n\n活动结束后10个自然日内提交材料。学生处在材料齐全后5个工作日内完成审核。校外差旅不适用本指南，应另按差旅制度办理。\n"
+    },
+    {
+      "id": "library", "filename": "05_图书馆服务规则.md",
+      "metadata": {"department": "图书馆", "year": 2025, "doc_type": "服务", "edition": "现行"},
+      "markdown": "# 青禾学院图书馆服务规则\n\n本文件为教学用虚构制度。\n\n## 开放时间\n\n第1页\n\n教学周周一至周五开放时间为08:00至22:00，周六、周日为09:00至18:00。法定节假日的开放安排另行通知，本规则不提供具体日期安排。\n\n## 借阅与续借\n\n第2页\n\n学生最多同时借阅10册，借期30天。无其他读者预约时可续借一次，延长15天。逾期未还书时暂停新的借阅，归还后恢复。\n\n## 研讨室\n\n第3页\n\n研讨室需至少3人预约，每组每天最多使用2小时。预约人须在开始时间后15分钟内签到，否则释放预约。室内禁止饮食，离开前应整理桌椅并关闭显示设备。\n"
+    }
+  ],
+  "questions": [
+    {"id": "q1", "query": "普通教职工现行住宿报销上限是多少？", "filters": {"year": 2025, "department": "财务处"}, "expected_document_ids": ["travel-2025"], "reference_answer": "每人每晚450元，按实际发票金额报销且不超过上限。", "learning_goal": "对比不加年份过滤时的旧版干扰。"},
+    {"id": "q2", "query": "2024年的住宿上限和报销提交时限分别是什么？", "filters": {"year": 2024}, "expected_document_ids": ["travel-2024"], "reference_answer": "每人每晚350元；出差结束后30个自然日内提交。", "learning_goal": "练习版本过滤与跨段落召回。"},
+    {"id": "q3", "query": "科研项目跨省出差，预算6000元，需要哪些审批？住宿标准是什么？", "filters": {"year": 2025, "doc_type": "差旅"}, "expected_document_ids": ["research-travel", "travel-2025"], "reference_answer": "出发前5个工作日申请，需部门负责人和项目负责人批准，科研处审核预算。普通教职工住宿上限每晚450元，随队学生280元。", "learning_goal": "跨文档整合；观察top_n过小时证据是否缺失。"},
+    {"id": "q4", "query": "社团活动结束后多久提交报销？活动物资预算上限是多少？", "filters": {"department": "学生处"}, "expected_document_ids": ["student-activity"], "reference_answer": "活动结束后10个自然日内；每场800元。", "learning_goal": "区分不同部门的相似报销规定。"},
+    {"id": "q5", "query": "普通教职工2025年出差两晚，住宿发票420元和480元，能报多少？", "filters": {"year": 2025, "department": "财务处"}, "expected_document_ids": ["travel-2025"], "reference_answer": "420 + 450 = 870元。", "learning_goal": "核验表格标准与计算依据。"},
+    {"id": "q6", "query": "2025年国庆节图书馆具体几点开门？", "filters": {"department": "图书馆"}, "expected_document_ids": ["library"], "reference_answer": "当前知识库无法确认，节假日安排另行通知。", "learning_goal": "召回相关材料也不代表材料包含答案。"},
+    {"id": "q7", "query": "青禾学院校长的手机号码是多少？", "filters": {}, "expected_document_ids": [], "reference_answer": "当前知识库无法确认。", "learning_goal": "识别知识库之外的问题，检查是否编造。"}
+  ]
+}

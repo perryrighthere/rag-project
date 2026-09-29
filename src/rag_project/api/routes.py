@@ -42,9 +42,29 @@ def _store():
     return get_store()
 
 
+def _require_idle(document_id: str) -> None:
+    if any(task.document_id == document_id and task.status in {"pending", "running"}
+           for task in _store().tasks.values()):
+        raise HTTPException(status_code=409, detail="Document has an active task; wait for it to finish.")
+
+
+def _configured_service(factory):
+    try:
+        return factory()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Service configuration failed: {exc}") from exc
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+async def _create_document_task(task_type: str, document_id: str) -> TaskRecord:
+    try:
+        return await _store().add_task(TaskRecord(task_type=task_type, document_id=document_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/knowledge-bases", response_model=KnowledgeBaseRecord, status_code=status.HTTP_201_CREATED)
@@ -82,6 +102,17 @@ async def update_metadata_schema(kb_id: str, payload: MetadataSchema) -> Knowled
     return record
 
 
+@router.delete("/knowledge-bases/{kb_id}")
+async def delete_knowledge_base(kb_id: str) -> dict:
+    try:
+        deleted = await _store().delete_knowledge_base(kb_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    return {"kb_id": kb_id, "deleted": True}
+
+
 @router.post("/knowledge-bases/{kb_id}/documents", response_model=DocumentRecord, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     kb_id: str,
@@ -110,7 +141,10 @@ async def upload_document(
         metadata=parsed_metadata,
         file_content=content,
     )
-    return await _store().add_document(record)
+    try:
+        return await _store().add_document(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/documents/{document_id}", response_model=DocumentRecord)
@@ -119,6 +153,20 @@ async def get_document(document_id: str) -> DocumentRecord:
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     return record
+
+
+@router.get("/knowledge-bases/{kb_id}/documents", response_model=list[DocumentRecord])
+async def list_documents(kb_id: str) -> list[DocumentRecord]:
+    await get_knowledge_base(kb_id)
+    return _store().list_documents(kb_id)
+
+
+@router.get("/knowledge-bases/{kb_id}/tasks", response_model=list[TaskRecord])
+async def list_knowledge_base_tasks(kb_id: str) -> list[TaskRecord]:
+    await get_knowledge_base(kb_id)
+    document_ids = {document.document_id for document in _store().list_documents(kb_id)}
+    return sorted((task for task in _store().tasks.values() if task.document_id in document_ids),
+                  key=lambda task: task.created_at, reverse=True)
 
 
 @router.get("/documents/{document_id}/chunks", response_model=DocumentChunksResponse)
@@ -179,6 +227,7 @@ async def update_document_metadata(document_id: str, payload: DocumentMetadataUp
 
 @router.delete("/documents/{document_id}", response_model=DocumentRecord)
 async def delete_document(document_id: str) -> DocumentRecord:
+    _require_idle(document_id)
     record = await _store().update_document(document_id, status="deleted")
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -187,6 +236,7 @@ async def delete_document(document_id: str) -> DocumentRecord:
 
 @router.post("/documents/{document_id}/parse", response_model=TaskRecord, status_code=status.HTTP_202_ACCEPTED)
 async def parse_document(document_id: str, background_tasks: BackgroundTasks) -> TaskRecord:
+    _require_idle(document_id)
     document = _store().get_document(document_id)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -195,14 +245,16 @@ async def parse_document(document_id: str, background_tasks: BackgroundTasks) ->
     if document.file_content is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document file content is unavailable")
 
-    task = await _store().add_task(TaskRecord(task_type="parse", document_id=document_id))
+    parser = _configured_service(get_parser)
+    task = await _create_document_task("parse", document_id)
     await _store().update_document(document_id, status="parsing", error=None)
-    background_tasks.add_task(_run_parse_task, task.task_id, document_id, get_parser())
+    background_tasks.add_task(_run_parse_task, task.task_id, document_id, parser)
     return task
 
 
 @router.post("/documents/{document_id}/index", response_model=TaskRecord, status_code=status.HTTP_202_ACCEPTED)
 async def index_document(document_id: str, background_tasks: BackgroundTasks) -> TaskRecord:
+    _require_idle(document_id)
     document = _store().get_document(document_id)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -211,14 +263,15 @@ async def index_document(document_id: str, background_tasks: BackgroundTasks) ->
     if document.parsed_document is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document must be parsed before indexing")
 
-    task = await _store().add_task(TaskRecord(task_type="index", document_id=document_id))
+    vector_store = _configured_service(get_vector_store)
+    task = await _create_document_task("index", document_id)
     await _store().update_document(document_id, status="chunking", error=None)
     background_tasks.add_task(
         _run_index_task,
         task.task_id,
         document_id,
         get_embedding_client,
-        get_vector_store(),
+        vector_store,
     )
     return task
 
@@ -235,6 +288,7 @@ async def reindex_document(document_id: str, background_tasks: BackgroundTasks) 
 
 @router.post("/documents/{document_id}/ingest", response_model=TaskRecord, status_code=status.HTTP_202_ACCEPTED)
 async def ingest_document(document_id: str, background_tasks: BackgroundTasks) -> TaskRecord:
+    _require_idle(document_id)
     document = _store().get_document(document_id)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -243,8 +297,9 @@ async def ingest_document(document_id: str, background_tasks: BackgroundTasks) -
     if document.file_content is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document file content is unavailable")
 
-    task = await _store().add_task(TaskRecord(task_type="ingest", document_id=document_id))
-    background_tasks.add_task(get_ingestion_graph().run, task_id=task.task_id, document_id=document_id)
+    graph = _configured_service(get_ingestion_graph)
+    task = await _create_document_task("ingest", document_id)
+    background_tasks.add_task(graph.run, task_id=task.task_id, document_id=document_id)
     return task
 
 
@@ -282,6 +337,7 @@ async def search(payload: RetrievalSearchRequest) -> RetrievalSearchResponse:
                 chunk_id=match.chunk_id,
                 document_id=match.document_id,
                 score=match.score,
+                rerank_score=match.rerank_score,
                 text=match.text,
                 source_uri=match.source_uri,
                 heading_path=match.heading_path,
@@ -352,7 +408,8 @@ async def _run_parse_task(task_id: str, document_id: str, parser: MinerUApiParse
     await _store().update_task(task_id, status="running")
 
     async def record_progress(stage: str, details: dict) -> None:
-        await _store().update_task(task_id, result={"stage": stage, **details})
+        current = _store().get_task(task_id)
+        await _store().update_task(task_id, result={**(current.result or {}), "stage": stage, **details})
         if raw_object_key := details.get("raw_object_key"):
             await _store().update_document(document_id, raw_object_key=raw_object_key)
 
@@ -401,9 +458,9 @@ async def _run_index_task(
         return
     assert document.parsed_document is not None
 
-    await _store().update_task(task_id, status="running")
+    await _store().update_task(task_id, status="running", result={"stage": "chunk_document"})
     try:
-        source_uri = _source_uri(document.parsed_document.markdown_object_key)
+        source_uri = document.parsed_document.source_uri or _source_uri(document.parsed_document.markdown_object_key)
         chunker = MarkdownChunker(knowledge_base.chunking_config)
         chunks = chunker.chunk_parsed_document(
             document.parsed_document,
@@ -413,7 +470,11 @@ async def _run_index_task(
             source_uri=source_uri,
         )
         await _store().update_document(document_id, status="embedding")
+        await _store().update_task(task_id, result={"stage": "embed_chunks"})
         embedding_client: OpenAICompatibleEmbeddingClient = embedding_client_factory()
+        await _store().bind_embedding(document.kb_id, embedding_client.config.model, embedding_client.config.dim)
+        await vector_store.ensure_collection(embedding_dim=embedding_client.config.dim,
+            embedding_model=embedding_client.config.model, metadata_schema=knowledge_base.metadata_schema)
         vectors = await embedding_client.embed_documents([chunk.text for chunk in chunks])
         chunks = [
             chunk.model_copy(
@@ -426,19 +487,16 @@ async def _run_index_task(
         ]
 
         await _store().update_document(document_id, status="embedding")
+        await _store().update_task(task_id, result={"stage": "upsert_milvus"})
         await vector_store.delete_document_chunks(kb_id=document.kb_id, document_id=document.document_id)
         await vector_store.upsert_chunks(
             chunks,
             vectors,
             metadata_schema=knowledge_base.metadata_schema,
             embedding_dim=embedding_client.config.dim,
+            embedding_model=embedding_client.config.model,
         )
         chunks = await _store().replace_document_chunks(document_id, chunks)
-        await _store().update_knowledge_base(
-            document.kb_id,
-            embedding_model=embedding_client.config.model,
-            embedding_dim=embedding_client.config.dim,
-        )
         await _store().update_document(
             document_id,
             status="indexed",
@@ -450,7 +508,7 @@ async def _run_index_task(
         await _store().update_task(
             task_id,
             status="succeeded",
-            result={"chunk_count": len(chunks), "embedding_model": embedding_client.config.model},
+            result={"stage": "indexed", "chunk_count": len(chunks), "embedding_model": embedding_client.config.model},
         )
     except Exception as exc:
         await _store().update_document(document_id, status="failed", error=str(exc))

@@ -2,7 +2,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update, and_, or_
 from sqlalchemy.orm import Session
 
 from rag_project.api.schemas import DocumentRecord, KnowledgeBaseRecord, TaskRecord
@@ -24,6 +24,37 @@ class SQLAlchemyStore:
 
     def __init__(self, session_factory: SessionFactory):
         self._session_factory = session_factory
+
+    def list_documents(self, kb_id: str) -> list[DocumentRecord]:
+        with self._session_factory() as session:
+            records = session.scalars(select(DocumentModel).where(DocumentModel.kb_id == kb_id)
+                                      .order_by(DocumentModel.created_at)).all()
+            return [_document_to_record(record) for record in records]
+
+    async def delete_knowledge_base(self, kb_id: str) -> bool:
+        with self._session_factory() as session:
+            model = session.scalar(select(KnowledgeBaseModel).where(KnowledgeBaseModel.id == kb_id).with_for_update())
+            if model is None:
+                return False
+            active = session.scalar(select(IngestionTaskModel.id).join(DocumentModel).where(
+                DocumentModel.kb_id == kb_id, IngestionTaskModel.status.in_(["pending", "running"])).limit(1))
+            if active:
+                raise ValueError("知识库中有正在执行的任务，请等待任务结束后再删除。")
+            session.delete(model)  # ORM cascades documents, chunks and tasks in this transaction.
+            session.commit()
+            return True
+
+    async def bind_embedding(self, kb_id: str, model: str, dim: int) -> None:
+        # Compare-and-set prevents two first indexing jobs from claiming different models.
+        with self._session_factory() as session:
+            result = session.execute(update(KnowledgeBaseModel).where(
+                KnowledgeBaseModel.id == kb_id,
+                or_(and_(KnowledgeBaseModel.embedding_model.is_(None), KnowledgeBaseModel.embedding_dim.is_(None)),
+                    and_(KnowledgeBaseModel.embedding_model == model, KnowledgeBaseModel.embedding_dim == dim)),
+            ).values(embedding_model=model, embedding_dim=dim))
+            if result.rowcount != 1:
+                raise ValueError("Embedding model/dimension mismatch. Use the original model or a new knowledge base and collection.")
+            session.commit()
 
     @property
     def knowledge_bases(self) -> dict[str, KnowledgeBaseRecord]:
@@ -100,6 +131,8 @@ class SQLAlchemyStore:
 
     async def add_document(self, record: DocumentRecord) -> DocumentRecord:
         with self._session_factory() as session:
+            if session.scalar(select(KnowledgeBaseModel).where(KnowledgeBaseModel.id == record.kb_id).with_for_update()) is None:
+                raise ValueError("Knowledge base not found")
             model = DocumentModel(
                 id=record.document_id,
                 kb_id=record.kb_id,
@@ -133,21 +166,24 @@ class SQLAlchemyStore:
             model = session.get(DocumentModel, document_id)
             if model is None:
                 return None
+            values = {}
             for key, value in changes.items():
                 if key == "metadata":
-                    model.metadata_json = value
+                    values["metadata_json"] = value
                 elif key == "parsed_document":
-                    model.parsed_document_json = _parsed_document_json(value)
-                    model.parser = value.parser if value else None
-                    model.parser_task_id = value.parser_task_id if value else None
-                    model.markdown_object_key = value.markdown_object_key if value else None
-                    model.content_list_object_key = value.content_list_object_key if value else None
-                    model.middle_json_object_key = value.middle_json_object_key if value else None
+                    values.update(parsed_document_json=_parsed_document_json(value),
+                        parser=value.parser if value else None,
+                        parser_task_id=value.parser_task_id if value else None,
+                        markdown_object_key=value.markdown_object_key if value else None,
+                        content_list_object_key=value.content_list_object_key if value else None,
+                        middle_json_object_key=value.middle_json_object_key if value else None)
                 elif key == "error":
-                    model.error_message = value
+                    values["error_message"] = value
                 elif hasattr(model, key):
-                    setattr(model, key, value)
-            model.updated_at = _now()
+                    values[key] = value
+            # A late background job must never resurrect a deleted document.
+            session.execute(update(DocumentModel).where(DocumentModel.id == document_id,
+                DocumentModel.status != "deleted").values(**values, updated_at=_now()))
             session.commit()
             session.refresh(model)
             return _document_to_record(model)
@@ -170,6 +206,10 @@ class SQLAlchemyStore:
 
     async def add_task(self, record: TaskRecord) -> TaskRecord:
         with self._session_factory() as session:
+            if record.document_id:
+                kb_id = session.scalar(select(DocumentModel.kb_id).where(DocumentModel.id == record.document_id))
+                if kb_id is None or session.scalar(select(KnowledgeBaseModel).where(KnowledgeBaseModel.id == kb_id).with_for_update()) is None:
+                    raise ValueError("Knowledge base or document not found")
             model = IngestionTaskModel(
                 id=record.task_id,
                 task_type=record.task_type,

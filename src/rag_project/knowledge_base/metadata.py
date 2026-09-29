@@ -6,6 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 MetadataFieldType = Literal["string", "int", "float", "bool", "date", "datetime", "string_array"]
 
+RESERVED_FIELDS = {"id", "kb_id", "document_id", "chunk_id", "chunk_index", "text", "embedding",
+                   "source_uri", "heading_path", "page_start", "page_end", "created_at", "metadata_json",
+                   "chunk_type", "parser", "parser_task_id", "embedding_model", "embedding_dim"}
+
 
 class MetadataValidationError(ValueError):
     """Raised when document metadata or filters violate a knowledge base schema."""
@@ -22,6 +26,8 @@ class MetadataField(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
+        if value in RESERVED_FIELDS or value.startswith("_"):
+            raise ValueError(f"metadata field name is reserved: {value}")
         if not value:
             raise ValueError("metadata field name cannot be empty")
         if not value.replace("_", "").isalnum() or value[0].isdigit():
