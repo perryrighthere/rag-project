@@ -76,8 +76,9 @@ class TaskRecord(BaseModel):
 
 
 class RetrievalSearchRequest(BaseModel):
-    kb_id: str
-    query: str
+    auto_intent: bool = False
+    kb_id: str | None = None
+    query: str = Field(min_length=1, max_length=4000)
     filters: dict[str, Any] = Field(default_factory=dict)
     top_k: int = Field(default=10, ge=1, le=100)
     top_n: int | None = Field(default=None, ge=1, le=100)
@@ -97,6 +98,7 @@ class RetrievalMatch(BaseModel):
 
 
 class RetrievalSearchResponse(BaseModel):
+    intent: dict[str, Any] | None = None
     query: str
     filter_expr: str
     matches: list[RetrievalMatch] = Field(default_factory=list)
@@ -109,8 +111,9 @@ class DocumentChunksResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    kb_id: str
-    query: str
+    auto_intent: bool = False
+    kb_id: str | None = None
+    query: str = Field(min_length=1, max_length=4000)
     filters: dict[str, Any] = Field(default_factory=dict)
     top_k: int = Field(default=10, ge=1, le=100)
     top_n: int | None = Field(default=None, ge=1, le=100)
@@ -130,6 +133,7 @@ class ChatCitation(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    intent: dict[str, Any] | None = None
     query: str
     answer: str
     filter_expr: str

@@ -10,6 +10,7 @@ from rag_project.retrieval import KnowledgeBaseRetriever
 
 
 class QAState(TypedDict, total=False):
+    retrieval_query: str
     query: str
     kb_id: str
     filters: dict[str, Any]
@@ -69,6 +70,7 @@ class QAGraph:
         top_n: int | None = None,
         orchestrator: QAOrchestratorName | None = None,
         include_agent_trace: bool = False,
+        retrieval_query: str | None = None,
     ) -> QAResult:
         limit = min(top_n or top_k, top_k)
         selected_orchestrator = orchestrator or self.default_orchestrator
@@ -76,6 +78,7 @@ class QAGraph:
             {
                 "kb_id": kb_id,
                 "query": query,
+                "retrieval_query": retrieval_query or query,
                 "filters": filters,
                 "top_k": top_k,
                 "top_n": limit,
@@ -130,7 +133,7 @@ class QAGraph:
     async def _retrieve(self, state: QAState) -> dict[str, Any]:
         candidates = await self.retriever.retrieve_candidates(
             kb_id=state["kb_id"],
-            query=state["query"],
+            query=state["retrieval_query"],
             filter_expr=state["filter_expr"],
             top_k=int(state["top_k"]),
         )

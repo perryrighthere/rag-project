@@ -383,3 +383,107 @@ async def test_delete_knowledge_base_rejects_active_tasks_atomically(classroom, 
     assert store.get_knowledge_base(kb_id) is not None
     await store.update_task('active', status='failed')
     assert client.delete(f'/knowledge-bases/{kb_id}').status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_auto_intent_experiment_uses_rewrite_but_answers_original(classroom, monkeypatch):
+    import json
+    client, store, factory = classroom
+    seed = client.post('/teaching/dataset/import',json={}).json()
+    kb_id = seed['knowledge_base']['kb_id']
+    await store.update_document(seed['documents'][0]['document_id'],status='indexed')
+    original = '请问2025年财务处住宿能报多少？'
+    rewritten = '财务处2025年差旅住宿报销上限'
+    class Chat:
+        config = SimpleNamespace(model='test-intent',base_url=None,api_key='EMPTY')
+        async def generate_text(self,prompt):
+            if 'RAG Intent Agent' in prompt:
+                return json.dumps({'kb_id':kb_id,'retrieval_query':rewritten,
+                    'filters':{'year':2025,'department':'财务处'},'rationale':'指定部门和年份',
+                    'needs_clarification':False,'clarification_question':None})
+            assert original in prompt
+            return '依据片段回答'
+    class Retriever:
+        def build_filter_expr(self,**kwargs):
+            assert kwargs == {'kb_id':kb_id,'filters':{'year':2025,'department':'财务处'}}
+            return 'kb_id == "test"'
+        async def retrieve_candidates(self,**kwargs):
+            assert kwargs['query'] == rewritten
+            return [Document(page_content='住宿标准',metadata={'chunk_id':'c1'})]
+        async def rerank_documents(self,**kwargs):
+            assert kwargs['query'] == original
+            return kwargs['documents'],None
+    monkeypatch.setattr(routes,'get_chat_client',Chat)
+    monkeypatch.setattr(routes,'get_retriever',Retriever)
+    response = client.post('/teaching/experiments',json={'auto_intent':True,'query':original,'mode':'chat'})
+    report = response.json()
+    assert report['status'] == 'succeeded', report.get('error')
+    assert report['request']['query'] == original
+    assert report['effective_request']['retrieval_query'] == rewritten
+    assert report['intent']['kb_id'] == kb_id
+    assert report['models']['intent'] == 'test-intent'
+    assert 'intent' in report['timings_ms']
+    assert ReportStore(factory).get(report['id']) == report
+
+
+def test_intent_clarification_and_failures_are_saved_without_retrieval(classroom,monkeypatch):
+    import json
+    client, store, _ = classroom
+    client.post('/teaching/dataset/import',json={})
+    class Chat:
+        config = SimpleNamespace(model='test-intent')
+        async def generate_text(self,prompt):
+            return json.dumps({'kb_id':None,'retrieval_query':'申请流程','filters':{},'rationale':'范围不明确',
+                'needs_clarification':True,'clarification_question':'请说明需要申请什么？'})
+    monkeypatch.setattr(routes,'get_chat_client',Chat)
+    monkeypatch.setattr(routes,'get_retriever',lambda:pytest.fail('must not retrieve'))
+    report = client.post('/teaching/experiments',json={'auto_intent':True,'query':'怎么申请？'}).json()
+    assert report['status'] == 'failed' and report['failed_stage'] == 'intent'
+    assert report['intent']['needs_clarification']
+    assert '申请什么' in report['error']
+    conflict = client.post('/teaching/experiments',json={'auto_intent':True,'query':'报销','filters':{'year':2025}}).json()
+    assert conflict['status'] == 'failed' and conflict['failed_stage'] == 'intent'
+
+
+@pytest.mark.asyncio
+async def test_intent_api_search_and_chat_use_validated_routing(classroom,monkeypatch):
+    import json
+    from rag_project.retrieval.intent import IntentAgent
+    from rag_project.graphs.qa import QAGraph
+    client,store,_ = classroom
+    seed = client.post('/teaching/dataset/import',json={}).json()
+    kb_id = seed['knowledge_base']['kb_id']
+    original, rewritten = '帮我找2025年的住宿标准', '2025年差旅住宿报销上限'
+    class Chat:
+        config = SimpleNamespace(model='test-intent')
+        async def generate_text(self,prompt):
+            return json.dumps({'kb_id':kb_id,'retrieval_query':rewritten,'filters':{'year':2025},
+                'rationale':'指定年份','needs_clarification':False,'clarification_question':None})
+        async def generate_answer(self,*,query,documents):
+            assert query == original
+            return 'answer'
+    class Retriever:
+        async def search(self,**kwargs):
+            assert kwargs['query'] == original and kwargs['retrieval_query'] == rewritten
+            assert kwargs['kb_id'] == kb_id and kwargs['filters'] == {'year':2025}
+            return SimpleNamespace(query=original,filter_expr='safe',matches=[],rerank_error=None)
+        def build_filter_expr(self,**kwargs):
+            assert kwargs == {'kb_id':kb_id,'filters':{'year':2025}}
+            return 'safe'
+        async def retrieve_candidates(self,**kwargs):
+            assert kwargs['query'] == rewritten
+            return []
+        async def rerank_documents(self,**kwargs):
+            assert kwargs['query'] == original
+            return [],None
+    monkeypatch.setattr(api_routes,'get_intent_agent',lambda:IntentAgent(store=store,chat_factory=Chat))
+    monkeypatch.setattr(api_routes,'get_retriever',Retriever)
+    monkeypatch.setattr(api_routes,'get_qa_graph',lambda:QAGraph(retriever=Retriever(),chat_client=Chat()))
+    plan = client.post('/intent/plan',json={'query':original})
+    assert plan.status_code == 200 and plan.json()['kb_id'] == kb_id
+    for path in ('/retrieval/search','/chat'):
+        response = client.post(path,json={'auto_intent':True,'query':original})
+        assert response.status_code == 200, response.text
+        assert response.json()['query'] == original
+        assert response.json()['intent']['retrieval_query'] == rewritten
+        assert client.post(path,json={'query':original}).status_code == 422

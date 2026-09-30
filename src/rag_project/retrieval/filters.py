@@ -1,4 +1,5 @@
 from datetime import date, datetime
+import math
 from typing import Any
 
 from rag_project.knowledge_base import MetadataField, MetadataSchema, MetadataValidationError
@@ -26,10 +27,12 @@ class MilvusFilterBuilder:
     def build(self, *, kb_id: str, metadata_schema: MetadataSchema, filters: dict[str, Any] | None) -> str:
         self._condition_count = 0
         base_expr = f'kb_id == "{_escape_string(kb_id)}"'
-        if not filters:
+        if filters is None:
             return base_expr
         if not isinstance(filters, dict):
             raise MetadataValidationError("filters must be a JSON object")
+        if not filters:
+            return base_expr
         filter_expr = self._build_node(metadata_schema, filters, depth=1)
         return f"{base_expr} and ({filter_expr})" if filter_expr else base_expr
 
@@ -51,7 +54,7 @@ class MilvusFilterBuilder:
             raise MetadataValidationError(f"{operator} must be a non-empty list")
         expressions = []
         for item in value:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or not item:
                 raise MetadataValidationError(f"{operator} items must be JSON objects")
             expressions.append(self._build_node(metadata_schema, item, depth=depth + 1))
         joiner = " and " if operator == "$and" else " or "
@@ -74,6 +77,13 @@ class MilvusFilterBuilder:
         return " and ".join(parts)
 
     def _operator_expr(self, field: MetadataField, operator: str, operand: Any) -> str:
+        if operand is None or (isinstance(operand, list) and any(item is None for item in operand)):
+            raise MetadataValidationError("null filter values are not supported")
+        values = operand if isinstance(operand, list) else [operand]
+        if any(isinstance(item, float) and not math.isfinite(item) for item in values):
+            raise MetadataValidationError("filter numbers must be finite")
+        if field.type == "string_array" and operator != "$contains":
+            raise MetadataValidationError("string_array only supports $contains")
         if operator in COMPARISON_OPERATORS:
             if operator not in {"$eq", "$ne"} and field.type not in ORDERABLE_TYPES:
                 raise MetadataValidationError(f"operator {operator} is not supported for {field.type}")

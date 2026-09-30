@@ -17,7 +17,7 @@ async function action(fn) {
   if (busy) return; busy = true;
   document.querySelectorAll("button,input,textarea,select").forEach(node => node.disabled = true);
   try { await fn(); } catch (error) { notice(error.message, true); }
-  finally { busy = false; document.querySelectorAll("button,input,textarea,select").forEach(node => node.disabled = false); }
+  finally { busy = false; document.querySelectorAll("button,input,textarea,select").forEach(node => node.disabled = false); syncIntentMode(); }
 }
 function option(select, value, label) { const node = el("option", label); node.value = value; select.append(node); }
 function config() { return {chunk_size: Number($("chunk-size").value), chunk_overlap: Number($("overlap").value)}; }
@@ -163,14 +163,38 @@ function showMatches(target, matches, snapshot) {
   matches.forEach((match, index) => { const node = el("details", undefined, "chunk"); node.open = index === 0; const doc = (snapshot || []).find(item => item.document_id === match.document_id);
     node.append(el("summary", `${index + 1}. ${doc?.filename || match.heading_path || match.chunk_id}`), el("p", `向量：${match.score ?? "—"} ｜ 重排：${match.rerank_score ?? "—"}`, "meta"), el("p", `${match.chunk_id} · 页码 ${match.page_start ?? "未知"}–${match.page_end ?? "未知"}`, "meta"), el("pre", match.text), el("p", match.source_uri || "", "meta")); $(target).append(node); });
 }
+function syncIntentMode() {
+  const automatic = $("auto-intent").checked;
+  $("kb").disabled = busy || automatic;
+  $("filters").disabled = busy || automatic;
+  $("preview-intent").disabled = busy || !automatic;
+}
+function showIntent(plan) {
+  if (!plan) { $("intent-result").textContent = "手动模式：使用原问题和手动过滤条件。"; return; }
+  const kb = plan.catalog.find(item => item.kb_id === plan.kb_id);
+  $("intent-result").textContent = `原问题：${plan.original_query}\n检索改写：${plan.retrieval_query}\n目标知识库：${kb ? kb.name + " · " + kb.kb_id : "待澄清"}\n过滤条件：${JSON.stringify(plan.filters, null, 2)}\n选择依据：${plan.rationale}\n${plan.needs_clarification ? "请补充：" + plan.clarification_question : "已通过后端字段和类型校验"}\n模型：${plan.model}`;
+}
+$("auto-intent").onchange = () => { syncIntentMode(); $("intent-result").textContent = "模式已切换，请重新运行或预览。"; };
+$("preview-intent").onclick = () => action(async () => {
+  const query = $("query").value.trim(); if (!query) throw new Error("请先输入问题。");
+  $("intent-result").textContent = "正在分析…";
+  notice("Intent Agent 正在分析全部知识库与元数据…");
+  let plan;
+  try { plan = await api("/intent/plan", {query}); }
+  catch (error) { $("intent-result").textContent = error.message; throw error; }
+  showIntent(plan);
+  notice(plan.needs_clarification ? plan.clarification_question : "问题理解已生成。运行实验时会重新分析，并将实际执行结果保存到报告。", plan.needs_clarification);
+});
 function showReport(report) {
+  showIntent(report.intent);
+  if (report.failed_stage === "intent" && !report.intent) $("intent-result").textContent = report.error;
   tab("experiment"); $("result-status").textContent = `${report.status} · ${report.elapsed_ms ?? 0} ms`;
   $("filter-expr").textContent = report.filter_expr || "尚未构造过滤表达式";
-  $("answer").textContent = report.error ? `实验失败：${report.error}` : report.answer ?? "本次为仅检索实验，未调用 Chat 模型。";
+  $("answer").textContent = report.error ? `实验失败：${report.error}` : report.answer ?? "本次为仅检索实验，未生成答案。";
   if (report.rerank_error) $("answer").textContent += `\n\n重排序已降级：${report.rerank_error}`;
   $("context").textContent = report.context || "无上下文";
   $("trace").textContent = JSON.stringify({prompts:report.prompts || [], agent_trace:report.agent_trace || []}, null, 2);
-  $("parameters").textContent = JSON.stringify({request:report.request, models:report.models, rerank_status:report.rerank_status, timings_ms:report.timings_ms, knowledge_base:report.knowledge_base, dataset:report.dataset}, null, 2);
+  $("parameters").textContent = JSON.stringify({request:report.request, effective_request:report.effective_request, intent:report.intent, models:report.models, rerank_status:report.rerank_status, timings_ms:report.timings_ms, knowledge_base:report.knowledge_base, dataset:report.dataset}, null, 2);
   const ref = report.reference_questions?.[0]; $("learning").textContent = ref?.learning_goal || `问题：${report.request.query}`; $("reference").textContent = ref?.reference_answer || "自定义问题暂无参考答案。";
   showMatches("candidates", report.candidates || [], report.documents); showMatches("matches", report.matches || [], report.documents);
   $("report-links").replaceChildren(); [["下载 Markdown 报告", "markdown"], ["查看完整 JSON", ""]].forEach(([label,suffix]) => { const link = el("a", label); link.href = `${base}/teaching/experiments/${report.id}${suffix ? "/" + suffix : ""}`; if (!suffix) { link.target="_blank"; link.rel="noopener"; } $("report-links").append(link); });
@@ -260,11 +284,13 @@ $("index").onclick = () => action(async () => {
   await refreshDocuments(); notice("索引完成。可以运行实验，或修改过滤条件进行对照。");
 });
 $("run").onclick = () => action(async () => {
-  if (!$("kb").value) throw new Error("请选择知识库。");
-  let filters; try { filters = JSON.parse($("filters").value); } catch { throw new Error("过滤条件不是有效 JSON。"); }
+  const automatic = $("auto-intent").checked;
+  if (!automatic && !$("kb").value) throw new Error("请选择知识库。");
+  let filters; try { filters = automatic ? {} : JSON.parse($("filters").value); } catch { throw new Error("过滤条件不是有效 JSON。"); }
   if (!filters || Array.isArray(filters) || typeof filters !== "object") throw new Error("过滤条件必须是 JSON 对象。");
   notice("实验运行中，完成后报告将自动保存在数据库…");
-  const report = await api("/teaching/experiments", {kb_id:$("kb").value, query:$("query").value, filters, top_k:Number($("top-k").value), top_n:Number($("top-n").value), rerank:$("rerank").checked, mode:$("mode").value, orchestrator:$("orchestrator").value});
+  const report = await api("/teaching/experiments", {auto_intent:automatic, kb_id:automatic ? null : $("kb").value, query:$("query").value, filters, top_k:Number($("top-k").value), top_n:Number($("top-n").value), rerank:$("rerank").checked, mode:$("mode").value, orchestrator:$("orchestrator").value});
+  if (report.intent?.kb_id) await refreshKB(report.intent.kb_id);
   showReport(report); notice(report.status === "failed" ? `实验失败，失败报告已保存：${report.error}` : `实验完成，报告已自动保存：${report.id}`, report.status === "failed");
 });
 $("reload-reports").onclick = () => action(history);

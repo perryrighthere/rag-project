@@ -8,12 +8,14 @@ from pydantic import BaseModel, Field, field_validator
 
 from rag_project.chat.openai_compatible import build_answer_prompt
 from rag_project.qa import create_qa_orchestrator
+from rag_project.retrieval.intent import IntentAgent
 from rag_project.qa.base import format_documents
 from rag_project.teaching.dataset import load_dataset
 
 
 class ExperimentRequest(BaseModel):
-    kb_id: str
+    kb_id: str | None = None
+    auto_intent: bool = False
     query: str = Field(min_length=1, max_length=4000)
     filters: dict[str, Any] = Field(default_factory=dict)
     top_k: int = Field(default=8, ge=1, le=100)
@@ -57,17 +59,32 @@ async def run_experiment(payload, *, store, reports, retriever_factory, chat_fac
               "timings_ms": {}, "candidates": [], "matches": [], "answer": None,
               "models": {"embedding": settings.embedding_model, "embedding_dim": settings.embedding_dim,
                          "chat": settings.chat_model if payload.mode == "chat" else None,
+                         "intent": settings.chat_model if payload.auto_intent else None,
                          "chat_temperature": settings.chat_temperature,
                          "chat_max_tokens": settings.chat_max_tokens,
                          "rerank": settings.rerank_model if payload.rerank and settings.rerank_base_url else None}}
     reports.save(report)
     phase = "snapshot"
     try:
-        kb = store.get_knowledge_base(payload.kb_id)
+        kb_id, filters, retrieval_query = payload.kb_id, payload.filters, payload.query
+        if payload.auto_intent:
+            phase = "intent"
+            if filters:
+                raise ValueError("智能模式自动生成过滤条件；手动条件请使用手动模式。")
+            stage = perf_counter()
+            plan = await IntentAgent(store=store, chat_factory=chat_factory).plan(payload.query)
+            report["intent"] = plan.model_dump(mode="json")
+            report["models"]["intent"] = plan.model
+            report["timings_ms"]["intent"] = round((perf_counter() - stage) * 1000, 2)
+            plan.require_ready()
+            kb_id, filters, retrieval_query = plan.kb_id, plan.filters, plan.retrieval_query
+        report["effective_request"] = {"kb_id": kb_id, "filters": filters, "retrieval_query": retrieval_query}
+        phase = "snapshot"
+        kb = store.get_knowledge_base(kb_id)
         if kb is None:
             raise ValueError("知识库不存在")
         report["knowledge_base"] = kb.model_dump(mode="json")
-        docs = store.list_documents(payload.kb_id)
+        docs = store.list_documents(kb_id)
         report["documents"] = [{"document_id": doc.document_id, "filename": doc.filename,
             "status": doc.status, "metadata": doc.metadata,
             "parse_options": doc.parsed_document.parse_options if doc.parsed_document else {},
@@ -84,9 +101,9 @@ async def run_experiment(payload, *, store, reports, retriever_factory, chat_fac
                 report["reference_questions"] = [q for q in dataset["questions"] if q["query"] == payload.query]
         phase = "retrieval"
         retriever = retriever_factory()
-        report["filter_expr"] = retriever.build_filter_expr(kb_id=payload.kb_id, filters=payload.filters)
+        report["filter_expr"] = retriever.build_filter_expr(kb_id=kb_id, filters=filters)
         stage = perf_counter()
-        candidates = await retriever.retrieve_candidates(kb_id=payload.kb_id, query=payload.query,
+        candidates = await retriever.retrieve_candidates(kb_id=kb_id, query=retrieval_query,
             filter_expr=report["filter_expr"], top_k=payload.top_k)
         report["timings_ms"]["retrieval"] = round((perf_counter() - stage) * 1000, 2)
         report["candidates"] = [serialize_document(doc) for doc in candidates]

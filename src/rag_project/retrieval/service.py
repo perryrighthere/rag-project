@@ -118,10 +118,11 @@ class KnowledgeBaseRetriever:
         filters: dict[str, Any],
         top_k: int,
         top_n: int | None = None,
+        retrieval_query: str | None = None,
     ) -> RetrievalResult:
         limit = min(top_n or top_k, top_k)
         filter_expr = self.build_filter_expr(kb_id=kb_id, filters=filters)
-        candidates = await self.retrieve_candidates(query=query, filter_expr=filter_expr, top_k=top_k, kb_id=kb_id)
+        candidates = await self.retrieve_candidates(query=retrieval_query or query, filter_expr=filter_expr, top_k=top_k, kb_id=kb_id)
         reranked, rerank_error = await self.rerank_documents(query=query, documents=candidates, top_n=limit)
         return RetrievalResult(
             query=query,

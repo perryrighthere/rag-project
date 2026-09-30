@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Uploa
 
 from rag_project.api.dependencies import (
     get_embedding_client,
+    get_intent_agent,
     get_ingestion_graph,
     get_parser,
     get_qa_graph,
@@ -32,6 +33,7 @@ from rag_project.embeddings import OpenAICompatibleEmbeddingClient
 from rag_project.knowledge_base import MetadataValidationError
 from rag_project.parsers import MinerUApiParser, ParseOptions, UploadedFile as ParserUploadedFile
 from rag_project.qa import QAOrchestratorError
+from rag_project.retrieval.intent import IntentRequest, IntentPlan, IntentError
 from rag_project.vectorstores import MilvusVectorStoreAdapter
 
 
@@ -311,13 +313,38 @@ async def get_task(task_id: str) -> TaskRecord:
     return record
 
 
+@router.post("/intent/plan", response_model=IntentPlan)
+async def plan_intent(payload: IntentRequest) -> IntentPlan:
+    try:
+        return await get_intent_agent().plan(payload.query)
+    except IntentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _resolve_intent(payload):
+    if not payload.query.strip():
+        raise HTTPException(status_code=422, detail="问题不能为空")
+    if not payload.auto_intent:
+        if not payload.kb_id:
+            raise HTTPException(status_code=422, detail="手动模式必须选择知识库")
+        return None, payload.kb_id, payload.filters
+    if payload.filters:
+        raise HTTPException(status_code=422, detail="智能模式自动生成过滤条件；手动条件请使用手动模式。")
+    plan = await plan_intent(IntentRequest(query=payload.query))
+    if plan.needs_clarification:
+        raise HTTPException(status_code=422, detail={"message": plan.clarification_question, "intent": plan.model_dump()})
+    return plan, plan.kb_id, plan.filters
+
+
 @router.post("/retrieval/search", response_model=RetrievalSearchResponse)
 async def search(payload: RetrievalSearchRequest) -> RetrievalSearchResponse:
+    plan, kb_id, filters = await _resolve_intent(payload)
     try:
         result = await get_retriever().search(
-            kb_id=payload.kb_id,
+            kb_id=kb_id,
             query=payload.query,
-            filters=payload.filters,
+            **({"retrieval_query": plan.retrieval_query} if plan else {}),
+            filters=filters,
             top_k=payload.top_k,
             top_n=payload.top_n,
         )
@@ -329,6 +356,7 @@ async def search(payload: RetrievalSearchRequest) -> RetrievalSearchResponse:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
     return RetrievalSearchResponse(
+        intent=plan.model_dump() if plan else None,
         query=result.query,
         filter_expr=result.filter_expr,
         rerank_error=result.rerank_error,
@@ -352,11 +380,13 @@ async def search(payload: RetrievalSearchRequest) -> RetrievalSearchResponse:
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest) -> ChatResponse:
+    plan, kb_id, filters = await _resolve_intent(payload)
     try:
         result = await get_qa_graph().run(
-            kb_id=payload.kb_id,
+            kb_id=kb_id,
             query=payload.query,
-            filters=payload.filters,
+            **({"retrieval_query": plan.retrieval_query} if plan else {}),
+            filters=filters,
             top_k=payload.top_k,
             top_n=payload.top_n,
             orchestrator=payload.orchestrator,
@@ -372,6 +402,7 @@ async def chat(payload: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
     return ChatResponse(
+        intent=plan.model_dump() if plan else None,
         query=result.query,
         answer=result.answer,
         filter_expr=result.filter_expr,

@@ -138,3 +138,8 @@ def get_ingestion_graph() -> IngestionGraph:
         embedding_client_factory=get_embedding_client,
         vector_store=get_vector_store(),
     )
+
+
+def get_intent_agent():
+    from rag_project.retrieval.intent import IntentAgent
+    return IntentAgent(store=get_store(), chat_factory=get_chat_client)
